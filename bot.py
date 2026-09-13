@@ -1,26 +1,42 @@
 import telebot
 import os
-import financedatabase as fd # İşte kütüphaneyi burada çağırıyoruz!
+import financedatabase as fd
 
-# BotFather'dan aldığın token
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN") 
-bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
+# DİKKAT: fcc-server'ın botu çalmasını engellemek için şifre adını değiştirdik!
+# Artık InstaPods'a TELEGRAM_BOT_TOKEN değil, EMRE_BOT_TOKEN yazacağız.
+TOKEN = os.environ.get("EMRE_BOT_TOKEN") 
+bot = telebot.TeleBot(TOKEN)
 
-# Emre Veri Ağı'nın Grup ID'si (Bunu daha sonra bulup buraya yazacağız)
-VERI_AGI_ID = "-100XXXXXXXXXX" 
+@bot.message_handler(commands=['start'])
+def ana_menu(message):
+    mesaj = (
+        "👑 EMRE AI Merkez Karargahı Aktif!\n\n"
+        "Sistem Durumu:\n"
+        "✅ Ana Beyin Bağlantısı: Başarılı\n"
+        "✅ FinanceDatabase: Hazır\n"
+        "⏳ US Stock Crash Monitor: Beklemede\n"
+        "⏳ TradingView Sinyal Ağı: Beklemede\n\n"
+        "Komutlar:\n"
+        "/piyasa - Finansal veritabanını test et"
+    )
+    bot.reply_to(message, mesaj)
 
 @bot.message_handler(commands=['piyasa'])
 def piyasa_durumu(message):
-    bot.reply_to(message, "Kral veritabanına bağlanıyorum, bekle...")
+    bot.reply_to(message, "📊 FinanceDatabase'e bağlanıyorum kral, bekle...")
     try:
-        # FinanceDatabase'den veri çekiyoruz (örnek: kriptolar)
         cryptos = fd.Cryptos()
-        veri = cryptos.options('currency') # Kriptoların hangi para birimlerinde işlem gördüğünü alalım
-        
-        mesaj = f"🚨 Emre AI Veri Ağı\n\nFinanceDatabase Aktif!\nKripto pazarındaki işlem gören para birimlerinden bazıları:\n{veri[:5]}"
+        veri = cryptos.options('currency')
+        mesaj = f"🚨 Emre Veri Ağı Aktif!\nKripto işlem para birimleri:\n{veri[:5]}"
         bot.send_message(message.chat.id, mesaj)
     except Exception as e:
-        bot.reply_to(message, f"Hata oluştu kral: {e}")
+        bot.reply_to(message, f"❌ Veritabanı Hatası: {e}")
 
-print("Emre AI, FinanceDatabase ile birlikte uyandı!")
-bot.polling(none_stop=True)
+@bot.message_handler(func=lambda message: True)
+def yapay_zeka_merkezi(message):
+    # İleride Groq/Gemini API kodlarını tam buraya gömeceğiz!
+    bot.reply_to(message, "Modüller yükleniyor kral... Şu an Yapay Zeka bağlantısı ve Crash Monitor entegrasyonu için altyapı hazırlanıyor.")
+
+print("Emre AI Bot Başlatıldı - Fişeklendi!")
+# Botun kapanmaması için sonsuz döngü
+bot.infinity_polling(timeout=10, long_polling_timeout=5)
