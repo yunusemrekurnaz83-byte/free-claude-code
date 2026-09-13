@@ -4,3 +4,4 @@ pyTelegramBotAPI
 financedatabase   # Bak, o koca depoyu sadece bu kelimeyle projeye indiriyoruz!
 pandas
 # TradingView-API ve Crash Monitor için özel ayarları daha sonra ekleyeceğiz
+requests
