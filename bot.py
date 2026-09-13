@@ -2,8 +2,8 @@ import telebot
 import os
 import financedatabase as fd
 
-# DİKKAT: fcc-server'ın botu çalmasını engellemek için şifre adını değiştirdik!
-# Artık InstaPods'a TELEGRAM_BOT_TOKEN değil, EMRE_BOT_TOKEN yazacağız.
+# DİKKAT: fcc-server'ın botu çalmasını engellemek için şifre adını EMRE_BOT_TOKEN yaptık!
+# InstaPods'ta Env sekmesine EMRE_BOT_TOKEN=SeninBotFatherSifren olarak eklediğinden emin ol.
 TOKEN = os.environ.get("EMRE_BOT_TOKEN") 
 bot = telebot.TeleBot(TOKEN)
 
@@ -25,16 +25,20 @@ def ana_menu(message):
 def piyasa_durumu(message):
     bot.reply_to(message, "📊 FinanceDatabase'e bağlanıyorum kral, bekle...")
     try:
-        cryptos = fd.Cryptos()
-        veri = cryptos.options('currency')
-        mesaj = f"🚨 Emre Veri Ağı Aktif!\nKripto işlem para birimleri:\n{veri[:5]}"
+        # FinanceDatabase güncel sürüm kodları
+        kriptolar = fd.Cryptos()
+        
+        # Veritabanından ilk 5 kripto sembolünü çekiyoruz (Hatasız yeni yöntem)
+        veri = list(kriptolar.select().keys())[:5] 
+        
+        mesaj = f"🚨 Emre Veri Ağı Aktif!\n\nSistemdeki ilk 5 Kripto Varlık:\n{', '.join(veri)}"
         bot.send_message(message.chat.id, mesaj)
     except Exception as e:
         bot.reply_to(message, f"❌ Veritabanı Hatası: {e}")
 
 @bot.message_handler(func=lambda message: True)
 def yapay_zeka_merkezi(message):
-    # İleride Groq/Gemini API kodlarını tam buraya gömeceğiz!
+    # Bir sonraki adımda Groq veya Gemini yapay zekasını buraya ekleyeceğiz!
     bot.reply_to(message, "Modüller yükleniyor kral... Şu an Yapay Zeka bağlantısı ve Crash Monitor entegrasyonu için altyapı hazırlanıyor.")
 
 print("Emre AI Bot Başlatıldı - Fişeklendi!")
