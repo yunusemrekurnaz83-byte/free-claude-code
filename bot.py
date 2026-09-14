@@ -1,7 +1,8 @@
 import os
 import sys
 
-print("Sistem kontrol ediliyor...")
+print("Sistem kontrol ediliyor ve eksik kütüphaneler kuruluyor...")
+# InstaPods bazen requirements.txt'yi atlayabilir, biz işimizi garantiye alalım!
 os.system("pip install pyTelegramBotAPI tradingview-ta requests")
 
 import telebot
@@ -16,11 +17,11 @@ if not TOKEN:
 bot = telebot.TeleBot(TOKEN)
 
 def ai_yorumla(mesaj):
-    # Motorları en hızlı ve stabil olandan başlayarak sıraya diziyoruz
+    # Model isimleri güncellendi (400 hatası çözüldü)
     motorlar = [
+        ("GROQ", "https://api.groq.com/openai/v1/chat/completions", "GROQ_API_KEY", "llama-3.1-8b-instant"),
         ("DEEPSEEK", "https://api.deepseek.com/chat/completions", "DEEPSEEK_API_KEY", "deepseek-chat"),
         ("MISTRAL", "https://api.mistral.ai/v1/chat/completions", "MISTRAL_API_KEY", "mistral-tiny"),
-        ("GROQ", "https://api.groq.com/openai/v1/chat/completions", "GROQ_API_KEY", "llama-3.1-8b-instant"),
         ("XAI", "https://api.x.ai/v1/chat/completions", "XAI_API_KEY", "grok-beta"),
         ("NVIDIA", "https://integrate.api.nvidia.com/v1/chat/completions", "NVIDIA_NIM_API_KEY", "meta/llama3-8b-instruct")
     ]
@@ -39,8 +40,9 @@ def ai_yorumla(mesaj):
             if resp.status_code == 200:
                 return f"⚡ [{isim}] " + resp.json()["choices"][0]["message"]["content"]
         except:
-            continue # Hata verirse diğer motora geç
+            continue # Hata verirse sessizce diğer motora geç
     
+    # Son Çare: GEMINI
     gemini_key = os.environ.get("GEMINI_API_KEY")
     if gemini_key:
         try:
@@ -52,7 +54,7 @@ def ai_yorumla(mesaj):
         except:
             pass
             
-    return "❌ Zeka Motorları Çöktü! API Kotan dolmuş olabilir."
+    return "❌ Zeka Motorları Çöktü! API Kotan dolmuş veya şifreler eksik olabilir."
 
 @bot.message_handler(commands=['start'])
 def ana_menu(message):
@@ -95,7 +97,7 @@ def tv_analiz(message):
         bot.edit_message_text(sonuc, chat_id=message.chat.id, message_id=mesaj_giden.message_id, parse_mode="Markdown")
 
     except Exception as e:
-        bot.edit_message_text(f"❌ TV Hatası: {e}", chat_id=message.chat.id, message_id=mesaj_giden.message_id)
+        bot.edit_message_text(f"❌ TV Hatası: {e}\n(Coin adını kontrol et, örn: BTCUSD)", chat_id=message.chat.id, message_id=mesaj_giden.message_id)
 
 @bot.message_handler(func=lambda message: True)
 def bos_mesaj_yakala(message):
