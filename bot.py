@@ -2,7 +2,6 @@ import telebot
 import os
 import requests
 from tradingview_ta import TA_Handler, Interval
-import financedatabase as fd
 
 # Token Kontrolü
 TOKEN = os.environ.get("EMRE_BOT_TOKEN")
@@ -12,12 +11,13 @@ if not TOKEN:
 bot = telebot.TeleBot(TOKEN)
 
 def ai_yorumla(mesaj, sistem_mesaji="Sen Emre AI'sın. Finans, veri ve kripto uzmanısın. Kısa, net, profesyonel ve stratejik cevaplar ver."):
+    # Model isimleri ve URL'ler 404/400 hatalarına karşı en güncel sürümlerle değiştirildi!
     motorlar = [
-        ("MISTRAL", "https://api.mistral.ai/v1/chat/completions", "MISTRAL_API_KEY", "mistral-large-latest"),
-        ("DEEPSEEK", "https://api.deepseek.com/chat/completions", "DEEPSEEK_API_KEY", "deepseek-chat"),
-        ("GROQ", "https://api.groq.com/openai/v1/chat/completions", "GROQ_API_KEY", "llama-3.1-8b-instant"),
+        ("GROQ", "https://api.groq.com/openai/v1/chat/completions", "GROQ_API_KEY", "llama3-8b-8192"),
+        ("NVIDIA", "https://integrate.api.nvidia.com/v1/chat/completions", "NVIDIA_NIM_API_KEY", "meta/llama3-70b-instruct"),
+        ("MISTRAL", "https://api.mistral.ai/v1/chat/completions", "MISTRAL_API_KEY", "mistral-small-latest"),
         ("XAI", "https://api.x.ai/v1/chat/completions", "XAI_API_KEY", "grok-beta"),
-        ("NVIDIA", "https://integrate.api.nvidia.com/v1/chat/completions", "NVIDIA_NIM_API_KEY", "meta/llama3-8b-instruct")
+        ("DEEPSEEK", "https://api.deepseek.com/chat/completions", "DEEPSEEK_API_KEY", "deepseek-chat")
     ]
 
     hatalar = []
@@ -47,11 +47,11 @@ def ai_yorumla(mesaj, sistem_mesaji="Sen Emre AI'sın. Finans, veri ve kripto uz
             hatalar.append(f"{isim}(Timeout)")
             continue # Hata verirse sessizce diğerine geç
     
-    # Son Çare: GEMINI
+    # Son Çare: GEMINI (404 hatasına karşı latest eklendi)
     gemini_key = os.environ.get("GEMINI_API_KEY")
     if gemini_key:
         try:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={gemini_key}"
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key={gemini_key}"
             data = {"contents": [{"parts": [{"text": sistem_mesaji + "\n\nKullanıcı Mesajı: " + mesaj}]}]}
             resp = requests.post(url, headers={"Content-Type": "application/json"}, json=data, timeout=15)
             if resp.status_code == 200:
