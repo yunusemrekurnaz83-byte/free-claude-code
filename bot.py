@@ -1,47 +1,63 @@
 import os
 import sys
 
-# 🚀 OTOMATİK KÜTÜPHANE KURULUMU (InstaPods hatalarına karşı kesin çözüm)
-print("Sistem kontrol ediliyor, eksik modüller zorla kuruluyor...")
-os.system("pip install pyTelegramBotAPI tradingview-ta financedatabase requests")
+print("Sistem kontrol ediliyor...")
+os.system("pip install pyTelegramBotAPI tradingview-ta requests")
 
 import telebot
 import requests
 from tradingview_ta import TA_Handler, Interval
 
-# ŞİFRELERİ ÇEK (Eski TELEGRAM_BOT_TOKEN yerine EMRE_BOT_TOKEN kullanıyoruz)
-TOKEN = os.environ.get("EMRE_BOT_TOKEN") 
-GROQ_KEY = os.environ.get("GROQ_API_KEY")
-
+TOKEN = os.environ.get("EMRE_BOT_TOKEN")
 if not TOKEN:
-    print("KRİTİK HATA: EMRE_BOT_TOKEN bulunamadı! InstaPods Env panelini kontrol et.")
+    print("HATA: EMRE_BOT_TOKEN bulunamadı!")
     sys.exit(1)
 
 bot = telebot.TeleBot(TOKEN)
 
-# SADECE GROQ KULLANIYORUZ (Şimşek hızında analiz için)
-def ai_yorumla(gercek_veri):
-    if not GROQ_KEY: return "❌ Groq şifresi eksik! InstaPods Env'e GROQ_API_KEY ekle."
-    try:
-        url = "https://api.groq.com/openai/v1/chat/completions"
-        headers = {"Authorization": f"Bearer {GROQ_KEY}", "Content-Type": "application/json"}
-        prompt = f"Sen usta bir kripto analistisin. Sana verilen şu anki canlı TradingView verilerini yorumla ve net bir AL/SAT/BEKLE yönü söyle. Başka bir şey uydurma. Veri: {gercek_veri}"
-        data = {
-            "model": "llama3-8b-8192", 
-            "messages": [{"role": "user", "content": prompt}]
-        }
-        resp = requests.post(url, headers=headers, json=data, timeout=10)
-        if resp.status_code == 200:
-            return resp.json()["choices"][0]["message"]["content"]
-        return f"❌ Groq Reddedildi (Kod: {resp.status_code})"
-    except Exception as e:
-        return f"❌ Zeka Çöktü: {e}"
+def ai_yorumla(mesaj):
+    # Motorları en hızlı ve stabil olandan başlayarak sıraya diziyoruz
+    motorlar = [
+        ("DEEPSEEK", "https://api.deepseek.com/chat/completions", "DEEPSEEK_API_KEY", "deepseek-chat"),
+        ("MISTRAL", "https://api.mistral.ai/v1/chat/completions", "MISTRAL_API_KEY", "mistral-tiny"),
+        ("GROQ", "https://api.groq.com/openai/v1/chat/completions", "GROQ_API_KEY", "llama-3.1-8b-instant"),
+        ("XAI", "https://api.x.ai/v1/chat/completions", "XAI_API_KEY", "grok-beta"),
+        ("NVIDIA", "https://integrate.api.nvidia.com/v1/chat/completions", "NVIDIA_NIM_API_KEY", "meta/llama3-8b-instruct")
+    ]
+    
+    for isim, url, env_adi, model in motorlar:
+        api_key = os.environ.get(env_adi)
+        if not api_key: continue
+        try:
+            headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+            data = {
+                "model": model,
+                "messages": [{"role": "system", "content": "Sen usta kripto analistisin. Gelen veriyi kısa ve çok net yorumla."}, 
+                             {"role": "user", "content": mesaj}]
+            }
+            resp = requests.post(url, headers=headers, json=data, timeout=7)
+            if resp.status_code == 200:
+                return f"⚡ [{isim}] " + resp.json()["choices"][0]["message"]["content"]
+        except:
+            continue # Hata verirse diğer motora geç
+    
+    gemini_key = os.environ.get("GEMINI_API_KEY")
+    if gemini_key:
+        try:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={gemini_key}"
+            data = {"contents": [{"parts": [{"text": "Usta kripto analisti olarak veriyi net yorumla: " + mesaj}]}]}
+            resp = requests.post(url, headers={"Content-Type": "application/json"}, json=data, timeout=10)
+            if resp.status_code == 200:
+                return "🧠 [GEMINI] " + resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+        except:
+            pass
+            
+    return "❌ Zeka Motorları Çöktü! API Kotan dolmuş olabilir."
 
 @bot.message_handler(commands=['start'])
 def ana_menu(message):
-    bot.reply_to(message, "👑 EMRE AI: CANLI TRADINGVIEW BAĞLANTISI AKTİF!\n\nTeknik analiz için yaz:\n/analiz BTCUSD\n/analiz ETHUSD")
+    bot.reply_to(message, "👑 EMRE AI: 6 MOTORLU TRADINGVIEW AĞI AKTİF!\n\nAnaliz için yaz:\n/analiz BTCUSD")
 
-# 📈 TRADINGVIEW CANLI VERİ ÇEKİCİ
 @bot.message_handler(commands=['analiz'])
 def tv_analiz(message):
     komut = message.text.split()
@@ -50,47 +66,40 @@ def tv_analiz(message):
         return
 
     coin = komut[1].upper()
-    mesaj = bot.reply_to(message, f"📡 TradingView'den {coin} canlı verileri çekiliyor...")
+    mesaj_giden = bot.reply_to(message, f"📡 TradingView'den {coin} canlı verileri çekiliyor...")
 
     try:
-        # TradingView'e bağlan (Günlük Grafik, Binance Borsası)
         handler = TA_Handler(
             symbol=coin,
             screener="crypto",
             exchange="BINANCE",
             interval=Interval.INTERVAL_1_DAY
         )
-        
         analiz = handler.get_analysis()
         
-        # O saniyelik gerçek veriler
         tavsiye = analiz.summary["RECOMMENDATION"]
         rsi = round(analiz.indicators["RSI"], 2)
         macd = round(analiz.indicators["MACD.macd"], 2)
         
-        veri_ozeti = f"Coin: {coin}\nTV Genel Kararı: {tavsiye}\nRSI: {rsi}\nMACD: {macd}"
+        veri_ozeti = f"Coin: {coin} | Sinyal: {tavsiye} | RSI: {rsi} | MACD: {macd}"
         
-        # Gerçek veriyi AI'a gönderip yorumlatıyoruz
-        bot.edit_message_text(f"🧠 Veriler kilitlendi! Groq zekası yorumluyor...", chat_id=message.chat.id, message_id=mesaj.message_id)
+        bot.edit_message_text(f"🧠 Veri geldi! 6 Motorlu zeka ağı en hızlısını arıyor...", chat_id=message.chat.id, message_id=mesaj_giden.message_id)
         ai_yorumu = ai_yorumla(veri_ozeti)
         
-        # Sonucu Telegram'a yolla
-        sonuc = f"📊 **TRADINGVIEW CANLI RAPOR: {coin}**\n\n"
+        sonuc = f"📊 **TRADINGVIEW CANLI: {coin}**\n\n"
         sonuc += f"🔹 **TV Sinyali:** {tavsiye}\n"
-        sonuc += f"🔹 **Canlı RSI:** {rsi}\n"
-        sonuc += f"🔹 **Canlı MACD:** {macd}\n\n"
-        sonuc += f"🧠 **Emre AI Yorumu:**\n{ai_yorumu}"
+        sonuc += f"🔹 **RSI:** {rsi}\n"
+        sonuc += f"🔹 **MACD:** {macd}\n\n"
+        sonuc += f"{ai_yorumu}"
         
-        bot.edit_message_text(sonuc, chat_id=message.chat.id, message_id=mesaj.message_id, parse_mode="Markdown")
+        bot.edit_message_text(sonuc, chat_id=message.chat.id, message_id=mesaj_giden.message_id, parse_mode="Markdown")
 
     except Exception as e:
-        bot.edit_message_text(f"❌ TradingView Hatası: Bu coin bulunamadı veya borsa yanlış. (Örn: BTCUSD yazmalısın)\nDetay: {e}", chat_id=message.chat.id, message_id=mesaj.message_id)
+        bot.edit_message_text(f"❌ TV Hatası: {e}", chat_id=message.chat.id, message_id=mesaj_giden.message_id)
 
-# Diğer yazıları engelle (Hayalet botu test etmek için)
 @bot.message_handler(func=lambda message: True)
 def bos_mesaj_yakala(message):
-    bot.reply_to(message, "Kral, şu an sadece /analiz komutuna odaklıyım. Lütfen /analiz BTCUSD yaz.")
+    bot.reply_to(message, "Kral, otonom sistemdeyiz. Sadece /analiz BTCUSD komutunu kullan.")
 
-print("Emre AI TradingView Modülüyle Başladı!")
-# Çakışmaları önlemek için bot ayarlarını güçlendirdik
-bot.infinity_polling(timeout=10, long_polling_timeout=5, skip_pending=True)
+print("Emre AI 6 Motorlu TradingView Modülüyle Başladı!")
+bot.infinity_polling(timeout=10, long_polling_timeout=5)
