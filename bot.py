@@ -32,11 +32,13 @@ def ai_yanit_al(mesaj):
             
         try:
             headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+            # 🧠 SİSTEM BEYNİ GÜNCELLENDİ (Sohbet edebilmesi ve kısa cevap vermesi için)
+            sistem_mesaji = "Sen Emre AI'sın. Samimi bir kripto analistisin. Kullanıcı selam verirse sadece sohbet et, piyasa özeti çıkarma. Analiz sorarsa çok kısa, öz ve net cevap ver. Destan yazma."
             data = {
                 "model": model,
-                "messages": [{"role": "system", "content": "Sen profesyonel bir kripto analistisin. Kısa ve net cevap ver. Markdown(Yıldız vs) kullanma."}, {"role": "user", "content": mesaj}]
+                "messages": [{"role": "system", "content": sistem_mesaji}, {"role": "user", "content": mesaj}]
             }
-            resp = requests.post(url, headers=headers, json=data, timeout=8)
+            resp = requests.post(url, headers=headers, json=data, timeout=15)
             if resp.status_code == 200:
                 yanit = resp.json()["choices"][0]["message"]["content"]
                 return f"⚡ [{isim}] " + temizle_markdown(yanit)
@@ -50,8 +52,10 @@ def ai_yanit_al(mesaj):
     if gemini_key:
         try:
             url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={gemini_key}"
-            data = {"contents": [{"parts": [{"text": "Sen profesyonel bir kripto analistisin. Net cevap ver, yıldız kullanma: " + mesaj}]}]}
-            resp = requests.post(url, headers={"Content-Type": "application/json"}, json=data, timeout=10)
+            # 🧠 GEMINI BEYNİ GÜNCELLENDİ
+            gemini_prompt = f"Sen Emre AI'sın. Kullanıcı selam verirse normal sohbet et. Soru sorarsa kısa, öz ve net finansal yorum yap. Soru: {mesaj}"
+            data = {"contents": [{"parts": [{"text": gemini_prompt}]}]}
+            resp = requests.post(url, headers={"Content-Type": "application/json"}, json=data, timeout=15)
             if resp.status_code == 200:
                 yanit = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
                 return "🧠 [GEMINI] " + temizle_markdown(yanit)
@@ -100,8 +104,8 @@ def tv_analiz(message):
         
         bot.edit_message_text(f"🧠 Veri geldi, 6 Motorlu Emre AI strateji oluşturuyor...", chat_id=message.chat.id, message_id=mesaj_giden.message_id)
 
-        veri_ozeti = f"{coin} için canlı teknik veriler: Sinyal={tavsiye}, Trend(ADX)={adx}, RSI={rsi}, MACD={macd}, SMA50={sma50}, SMA200={sma200}. Bu göstergeleri analiz et, alım mı satım mı mantıklı söyle. Cevabında ASLA yıldız veya kalın harf kullanma."
-        
+        # AI'a giden emri kısalttık
+        veri_ozeti = f"Kısa ve net yorumla. Destan yazma. Coin: {coin}, Sinyal: {tavsiye}, ADX: {adx}, RSI: {rsi}, MACD: {macd}, SMA50: {sma50}, SMA200: {sma200}."
         ai_yorumu = ai_yanit_al(veri_ozeti)
         
         sonuc = f"📊 PRO TRADINGVIEW ANALİZİ: {coin}\n\n"
@@ -109,7 +113,9 @@ def tv_analiz(message):
         sonuc += f"🌊 Trend Gücü (ADX): {adx}\n"
         sonuc += f"⚡ RSI: {rsi} | MACD: {macd}\n"
         sonuc += f"🎯 SMA50: {sma50} | SMA200: {sma200}\n\n"
-        sonuc += f"🤖 EMRE AI YORUMU:\n{ai_yorumu}"
+        sonuc += f"🤖 EMRE AI YORUMU:\n{ai_yorumu}\n\n"
+        # 🛡️ YTD ZIRHI EKLENDİ
+        sonuc += f"⚠️ *Not: Bu bir yapay zeka analizidir, kesinlikle Yatırım Tavsiyesi Değildir (YTD).* 🛡️"
         
         bot.edit_message_text(sonuc, chat_id=message.chat.id, message_id=mesaj_giden.message_id)
 
