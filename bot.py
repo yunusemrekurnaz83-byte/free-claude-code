@@ -7,17 +7,22 @@ from tradingview_ta import TA_Handler, Interval
 TOKEN = os.environ.get("EMRE_BOT_TOKEN") 
 bot = telebot.TeleBot(TOKEN)
 
+# TELEGRAM ÇÖKMESİNİ ENGELLEYEN ZIRH
+def temizle_markdown(metin):
+    # AI'nin Telegram'ı bozacak yıldız ve alt çizgilerini temizliyoruz
+    return metin.replace("*", "").replace("_", "").replace("`", "")
+
 # 🧠 ZIRHLI VE GÜNCEL YAPAY ZEKA AĞI
 def ai_yanit_al(mesaj):
     hata_raporu = []
     
-    # KAYA GİBİ SAĞLAM VE %100 ÇALIŞAN STANDART MODELLER
+    # KAYA GİBİ SAĞLAM VE %100 ÇALIŞAN STANDART MODELLER (En düşük/hızlı)
     motorlar = [
-        ("GROQ", "https://api.groq.com/openai/v1/chat/completions", "GROQ_API_KEY", "llama3-8b-8192"), # Groq'un en stabil modeli
-        ("MISTRAL", "https://api.mistral.ai/v1/chat/completions", "MISTRAL_API_KEY", "mistral-small-latest"), # Limit yememek için small seçtik
+        ("GROQ", "https://api.groq.com/openai/v1/chat/completions", "GROQ_API_KEY", "llama3-8b-8192"),
+        ("MISTRAL", "https://api.mistral.ai/v1/chat/completions", "MISTRAL_API_KEY", "open-mistral-7b"), 
         ("XAI", "https://api.x.ai/v1/chat/completions", "XAI_API_KEY", "grok-beta"),
         ("NVIDIA", "https://integrate.api.nvidia.com/v1/chat/completions", "NVIDIA_NIM_API_KEY", "meta/llama3-8b-instruct"),
-        ("DEEPSEEK", "https://api.deepseek.com/chat/completions", "DEEPSEEK_API_KEY", "deepseek-chat") # Kredisi bitik olabilir (402) sona attık
+        ("DEEPSEEK", "https://api.deepseek.com/chat/completions", "DEEPSEEK_API_KEY", "deepseek-chat") 
     ]
 
     for isim, url, env_adi, model in motorlar:
@@ -29,25 +34,27 @@ def ai_yanit_al(mesaj):
             headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
             data = {
                 "model": model,
-                "messages": [{"role": "system", "content": "Sen profesyonel bir kripto analistisin. Kısa ve net cevap ver."}, {"role": "user", "content": mesaj}]
+                "messages": [{"role": "system", "content": "Sen profesyonel bir kripto analistisin. Kısa ve net cevap ver. Markdown(Yıldız vs) kullanma."}, {"role": "user", "content": mesaj}]
             }
             resp = requests.post(url, headers=headers, json=data, timeout=8)
             if resp.status_code == 200:
-                return f"⚡ [{isim}] " + resp.json()["choices"][0]["message"]["content"]
+                yanit = resp.json()["choices"][0]["message"]["content"]
+                return f"⚡ [{isim}] " + temizle_markdown(yanit)
             else:
                 hata_raporu.append(f"{isim}({resp.status_code})")
         except Exception as e:
             hata_raporu.append(f"{isim}(Timeout)")
 
-    # GOOGLE GEMINI (Model ismi 1.5-flash olarak düzeltildi, 404 vermeyecek!)
+    # GOOGLE GEMINI (Son Çare)
     gemini_key = os.environ.get("GEMINI_API_KEY")
     if gemini_key:
         try:
             url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={gemini_key}"
-            data = {"contents": [{"parts": [{"text": "Sen profesyonel bir kripto analistisin. Net cevap ver: " + mesaj}]}]}
+            data = {"contents": [{"parts": [{"text": "Sen profesyonel bir kripto analistisin. Net cevap ver, yıldız kullanma: " + mesaj}]}]}
             resp = requests.post(url, headers={"Content-Type": "application/json"}, json=data, timeout=10)
             if resp.status_code == 200:
-                return "🧠 [GEMINI] " + resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+                yanit = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+                return "🧠 [GEMINI] " + temizle_markdown(yanit)
             else:
                 hata_raporu.append(f"GEMINI({resp.status_code})")
         except Exception as e:
@@ -57,7 +64,7 @@ def ai_yanit_al(mesaj):
         return "❌ InstaPods Env panelinde hiçbir API şifresi bulunamadı!"
         
     detay = " | ".join(hata_raporu)
-    return f"❌ YAPAY ZEKA BAĞLANTISI KURULAMADI!\n\nSağlayıcılar API şifrelerini reddediyor veya modeller değişti.\nHatalar: {detay}"
+    return f"❌ YAPAY ZEKA BAĞLANTISI KURULAMADI!\n\nŞifrelerin bitmiş veya sağlayıcılar çökmüş. Hatalar: {detay}"
 
 @bot.message_handler(commands=['start'])
 def ana_menu(message):
@@ -91,9 +98,9 @@ def tv_analiz(message):
         sma50 = round(analiz.indicators.get("SMA50", 0), 2)
         sma200 = round(analiz.indicators.get("SMA200", 0), 2)
         
-        bot.edit_message_text(f"🧠 Veri geldi, Emre AI strateji oluşturuyor...", chat_id=message.chat.id, message_id=mesaj_giden.message_id)
+        bot.edit_message_text(f"🧠 Veri geldi, 6 Motorlu Emre AI strateji oluşturuyor...", chat_id=message.chat.id, message_id=mesaj_giden.message_id)
 
-        veri_ozeti = f"{coin} için canlı teknik veriler geldi. Sinyal: {tavsiye}. Trend Gücü (ADX): {adx}. RSI: {rsi}. MACD: {macd}. SMA50: {sma50}. SMA200: {sma200}. Bu göstergeleri kısa, karizmatik bir profesyonel analist diliyle yorumla. Alım mı satım mı mantıklı, belirt. (Cevabında yıldız veya Markdown kullanma, düz metin olsun)."
+        veri_ozeti = f"{coin} için canlı teknik veriler: Sinyal={tavsiye}, Trend(ADX)={adx}, RSI={rsi}, MACD={macd}, SMA50={sma50}, SMA200={sma200}. Bu göstergeleri analiz et, alım mı satım mı mantıklı söyle. Cevabında ASLA yıldız veya kalın harf kullanma."
         
         ai_yorumu = ai_yanit_al(veri_ozeti)
         
