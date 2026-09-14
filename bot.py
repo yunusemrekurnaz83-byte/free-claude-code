@@ -71,21 +71,22 @@ def ana_menu(message):
 def interaktif_analiz(message):
     komut = message.text.split()
     if len(komut) < 2:
-        bot.reply_to(message, "Kral hangi coini inceleyeyim? Örnek: /analiz BTC")
+        bot.reply_to(message, "Kral hangi coini inceleyeyim? Örnek: /analiz AVAX")
         return
 
     coin = komut[1].upper()
+    # Binance'de coinler USDT ile listelenir, USD hatasını düzeltiyoruz!
     if not coin.endswith("USD") and not coin.endswith("USDT"):
-        tv_coin = f"{coin}USD" # Tradingview için sonuna USD ekliyoruz
+        tv_coin = f"{coin}USDT" 
     else:
         tv_coin = coin
-        coin = coin.replace("USDT", "").replace("USD", "") # Butonlar için temizliyoruz
+        coin = coin.replace("USDT", "").replace("USD", "") 
 
     # Butonları oluştur
     markup = InlineKeyboardMarkup()
     btn_gosterge = InlineKeyboardButton("📊 İndikatörleri Göster", callback_data=f"indikatör_{tv_coin}")
     btn_ai = InlineKeyboardButton("🧠 AI Yorumu Al", callback_data=f"ai_{tv_coin}")
-    btn_fiyat = InlineKeyboardButton("💵 Fiyat ve Çeviri (TL/USDT)", callback_data=f"fiyat_{coin}")
+    btn_fiyat = InlineKeyboardButton("💵 Fiyat ve Çeviri", callback_data=f"fiyat_{coin}")
     
     markup.row(btn_gosterge)
     markup.row(btn_ai)
@@ -104,27 +105,38 @@ def buton_islem(call):
         try:
             handler = TA_Handler(symbol=hedef_coin, screener="crypto", exchange="BINANCE", interval=Interval.INTERVAL_1_DAY)
             analiz = handler.get_analysis()
+            
+            # Eksik indikatörlerin hepsini geri getirdik
             tavsiye = analiz.summary.get("RECOMMENDATION", "NÖTR")
             rsi = round(analiz.indicators.get("RSI", 0), 2)
             macd = round(analiz.indicators.get("MACD.macd", 0), 2)
+            adx = round(analiz.indicators.get("ADX", 0), 2)
+            sma50 = round(analiz.indicators.get("SMA50", 0), 2)
+            sma200 = round(analiz.indicators.get("SMA200", 0), 2)
             
             metin = f"📊 <b>GÜNLÜK İNDİKATÖRLER: {hedef_coin}</b>\n\n"
             metin += f"📈 Sinyal: <code>{tavsiye}</code>\n"
-            metin += f"⚡ RSI: <code>{rsi}</code>\n"
-            metin += f"🌊 MACD: <code>{macd}</code>"
+            metin += f"🌊 Trend Gücü (ADX): <code>{adx}</code>\n"
+            metin += f"⚡ RSI: <code>{rsi}</code> | MACD: <code>{macd}</code>\n"
+            metin += f"🎯 SMA50: <code>{sma50}</code> | SMA200: <code>{sma200}</code>"
+            
             bot.send_message(call.message.chat.id, metin, parse_mode="HTML")
-        except:
-            bot.send_message(call.message.chat.id, "❌ TV verisi alınamadı.")
+        except Exception as e:
+            bot.send_message(call.message.chat.id, f"❌ TV verisi alınamadı. Coin Binance'de bulunmuyor olabilir.")
 
     elif islem == "ai":
         mesaj = bot.send_message(call.message.chat.id, "🧠 Emre AI grafikleri inceliyor...")
         try:
             handler = TA_Handler(symbol=hedef_coin, screener="crypto", exchange="BINANCE", interval=Interval.INTERVAL_1_DAY)
             analiz = handler.get_analysis()
+            
             tavsiye = analiz.summary.get("RECOMMENDATION", "NÖTR")
             rsi = round(analiz.indicators.get("RSI", 0), 2)
+            macd = round(analiz.indicators.get("MACD.macd", 0), 2)
+            adx = round(analiz.indicators.get("ADX", 0), 2)
             
-            veri_ozeti = f"Coin: {hedef_coin}, TV Sinyali: {tavsiye}, RSI: {rsi}."
+            # AI artık bütün verilere bakarak analiz yapıyor
+            veri_ozeti = f"Coin: {hedef_coin}, TV Sinyali: {tavsiye}, Trend Gücü(ADX): {adx}, RSI: {rsi}, MACD: {macd}."
             motor_adi, ai_yorumu = ai_motoru(veri_ozeti, analiz_mi=True)
             
             metin = f"🤖 <b>EMRE AI STRATEJİSİ [{motor_adi}]:</b>\n"
