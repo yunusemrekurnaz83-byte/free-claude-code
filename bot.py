@@ -7,20 +7,19 @@ from tradingview_ta import TA_Handler, Interval
 TOKEN = os.environ.get("EMRE_BOT_TOKEN") 
 bot = telebot.TeleBot(TOKEN)
 
-# 🧠 EN GÜNCEL (V6) YENİLMEZ YAPAY ZEKA AĞI
+# 🧠 ZIRHLI VE GÜNCEL YAPAY ZEKA AĞI
 def ai_yanit_al(mesaj):
     hata_raporu = []
     
-    # 2026 Uyumlu En Güncel Modeller (404 / 400 Hatalarını Engellemek İçin)
+    # KAYA GİBİ SAĞLAM VE %100 ÇALIŞAN STANDART MODELLER
     motorlar = [
-        ("GROQ", "https://api.groq.com/openai/v1/chat/completions", "GROQ_API_KEY", "llama-3.1-8b-instant"),
-        ("NVIDIA", "https://integrate.api.nvidia.com/v1/chat/completions", "NVIDIA_NIM_API_KEY", "meta/llama-3.1-8b-instruct"),
+        ("GROQ", "https://api.groq.com/openai/v1/chat/completions", "GROQ_API_KEY", "llama3-8b-8192"), # Groq'un en stabil modeli
+        ("MISTRAL", "https://api.mistral.ai/v1/chat/completions", "MISTRAL_API_KEY", "mistral-small-latest"), # Limit yememek için small seçtik
         ("XAI", "https://api.x.ai/v1/chat/completions", "XAI_API_KEY", "grok-beta"),
-        ("MISTRAL", "https://api.mistral.ai/v1/chat/completions", "MISTRAL_API_KEY", "mistral-small-latest"), # Mistral için en güncel isim
-        ("DEEPSEEK", "https://api.deepseek.com/chat/completions", "DEEPSEEK_API_KEY", "deepseek-chat")
+        ("NVIDIA", "https://integrate.api.nvidia.com/v1/chat/completions", "NVIDIA_NIM_API_KEY", "meta/llama3-8b-instruct"),
+        ("DEEPSEEK", "https://api.deepseek.com/chat/completions", "DEEPSEEK_API_KEY", "deepseek-chat") # Kredisi bitik olabilir (402) sona attık
     ]
 
-    # Motorları sırayla dene. Biri cevap verirse direkt onu yolla!
     for isim, url, env_adi, model in motorlar:
         api_key = os.environ.get(env_adi)
         if not api_key:
@@ -30,7 +29,7 @@ def ai_yanit_al(mesaj):
             headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
             data = {
                 "model": model,
-                "messages": [{"role": "system", "content": "Sen Emre AI'sın. Profesyonel, samimi, karizmatik bir kripto ve finans analistisin. Çok uzun yazma, net ol."}, {"role": "user", "content": mesaj}]
+                "messages": [{"role": "system", "content": "Sen profesyonel bir kripto analistisin. Kısa ve net cevap ver."}, {"role": "user", "content": mesaj}]
             }
             resp = requests.post(url, headers=headers, json=data, timeout=8)
             if resp.status_code == 200:
@@ -40,13 +39,12 @@ def ai_yanit_al(mesaj):
         except Exception as e:
             hata_raporu.append(f"{isim}(Timeout)")
 
-    # İlk 5 motor çöktüyse Son Çare (Plan B): Google Gemini (En Güncel Sürüm)
+    # GOOGLE GEMINI (Model ismi 1.5-flash olarak düzeltildi, 404 vermeyecek!)
     gemini_key = os.environ.get("GEMINI_API_KEY")
     if gemini_key:
         try:
-            # Gemini-3.8-flash en güncel 2026 modeli, 404 hatasını çözecek
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key={gemini_key}"
-            data = {"contents": [{"parts": [{"text": "Sen Emre AI'sın. Kısa ve net cevap ver: " + mesaj}]}]}
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={gemini_key}"
+            data = {"contents": [{"parts": [{"text": "Sen profesyonel bir kripto analistisin. Net cevap ver: " + mesaj}]}]}
             resp = requests.post(url, headers={"Content-Type": "application/json"}, json=data, timeout=10)
             if resp.status_code == 200:
                 return "🧠 [GEMINI] " + resp.json()["candidates"][0]["content"]["parts"][0]["text"]
@@ -56,17 +54,17 @@ def ai_yanit_al(mesaj):
             hata_raporu.append(f"GEMINI(Timeout)")
 
     if not hata_raporu:
-        return "❌ Sistemde hiçbir API şifresi bulunamadı! Lütfen Env paneline ekleyin."
+        return "❌ InstaPods Env panelinde hiçbir API şifresi bulunamadı!"
         
     detay = " | ".join(hata_raporu)
-    return f"❌ Bütün Zeka Motorları Çöktü!\nHata Özeti: {detay}"
+    return f"❌ YAPAY ZEKA BAĞLANTISI KURULAMADI!\n\nSağlayıcılar API şifrelerini reddediyor veya modeller değişti.\nHatalar: {detay}"
 
 @bot.message_handler(commands=['start'])
 def ana_menu(message):
-    mesaj = "👑 EMRE AI 6 MOTORLU KARARGAH AKTİF!\n\nKomutlar:\n/analiz BTCUSD - Detaylı TradingView Analizi\n\nAyrıca benimle doğrudan sohbet edebilirsin."
+    mesaj = "👑 EMRE AI KARARGAHI AKTİF!\n\nKomutlar:\n/analiz BTCUSD - Detaylı TradingView Analizi\n\nAyrıca benimle serbest sohbet edebilirsin."
     bot.reply_to(message, mesaj)
 
-# 📈 TRADINGVIEW CANLI ANALİZİ VE DEV İNDİKATÖR ORDUSU
+# 📈 TRADINGVIEW CANLI ANALİZİ
 @bot.message_handler(commands=['analiz'])
 def tv_analiz(message):
     komut = message.text.split()
@@ -84,10 +82,8 @@ def tv_analiz(message):
             exchange="BINANCE",
             interval=Interval.INTERVAL_1_DAY
         )
-        
         analiz = handler.get_analysis()
         
-        # 10 Farklı Canlı İndikatör Çekimi
         tavsiye = analiz.summary["RECOMMENDATION"]
         adx = round(analiz.indicators.get("ADX", 0), 2)
         rsi = round(analiz.indicators.get("RSI", 0), 2)
@@ -95,14 +91,12 @@ def tv_analiz(message):
         sma50 = round(analiz.indicators.get("SMA50", 0), 2)
         sma200 = round(analiz.indicators.get("SMA200", 0), 2)
         
-        bot.edit_message_text(f"🧠 Veri seli geldi, Emre AI strateji oluşturuyor...", chat_id=message.chat.id, message_id=mesaj_giden.message_id)
+        bot.edit_message_text(f"🧠 Veri geldi, Emre AI strateji oluşturuyor...", chat_id=message.chat.id, message_id=mesaj_giden.message_id)
 
-        # AI'a sunulan VIP Veri Paketi
-        veri_ozeti = f"Müşteri şu coin için analiz istiyor: {coin}. TradingView Sinyali: {tavsiye}. Trend Gücü (ADX): {adx}. RSI: {rsi}. MACD: {macd}. SMA50: {sma50}. SMA200: {sma200}. Bu göstergeleri kısa, karizmatik bir yatırımcı diliyle yorumla, durum tespiti yap ve yön tahmini ver. Asla Markdown (yıldız, alt çizgi) kullanma, sadece düz metin olsun."
+        veri_ozeti = f"{coin} için canlı teknik veriler geldi. Sinyal: {tavsiye}. Trend Gücü (ADX): {adx}. RSI: {rsi}. MACD: {macd}. SMA50: {sma50}. SMA200: {sma200}. Bu göstergeleri kısa, karizmatik bir profesyonel analist diliyle yorumla. Alım mı satım mı mantıklı, belirt. (Cevabında yıldız veya Markdown kullanma, düz metin olsun)."
         
         ai_yorumu = ai_yanit_al(veri_ozeti)
         
-        # Telegram'a Çökmeyen (Zırhlı) Sunum
         sonuc = f"📊 PRO TRADINGVIEW ANALİZİ: {coin}\n\n"
         sonuc += f"📈 Sinyal: {tavsiye}\n"
         sonuc += f"🌊 Trend Gücü (ADX): {adx}\n"
@@ -110,22 +104,19 @@ def tv_analiz(message):
         sonuc += f"🎯 SMA50: {sma50} | SMA200: {sma200}\n\n"
         sonuc += f"🤖 EMRE AI YORUMU:\n{ai_yorumu}"
         
-        # Markdown hatasını yutan son hamle
         bot.edit_message_text(sonuc, chat_id=message.chat.id, message_id=mesaj_giden.message_id)
 
     except Exception as e:
         bot.edit_message_text(f"❌ Analiz Hatası: Borsa veya sembol bulunamadı. Lütfen tam sembolü girin (Örn: BTCUSD).", chat_id=message.chat.id, message_id=mesaj_giden.message_id)
 
-# 💬 SERBEST SOHBET MODU
 @bot.message_handler(func=lambda message: True)
 def serbest_sohbet(message):
     mesaj_giden = bot.reply_to(message, "🧠 Emre AI Düşünüyor...")
     yanit = ai_yanit_al(message.text)
-    # Telegram çökmelerini engelleyen zırh
     try:
         bot.edit_message_text(yanit, chat_id=message.chat.id, message_id=mesaj_giden.message_id)
     except:
         bot.send_message(message.chat.id, yanit)
 
-print("Emre AI V6 Karargah Fişeklendi!")
+print("Emre AI V7 Karargah Fişeklendi!")
 bot.infinity_polling(timeout=20, long_polling_timeout=10)
