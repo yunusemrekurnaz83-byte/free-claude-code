@@ -102,21 +102,42 @@ def piyasa_durumu(message):
 def tv_analiz(message):
     komut = message.text.split()
     if len(komut) < 2:
-        bot.reply_to(message, "Kral hangi coini inceleyeyim? Örnek: /analiz BTC")
+        bot.reply_to(message, "Kral hangi coini inceleyeyim? Örnek: /analiz BTC 1s (veya 15dk, 4s, 1g)")
         return
 
     # USDT çifti zorunlu yapılıyor (Binance'de çalışması için)
     coin_ham = komut[1].upper()
     coin = coin_ham.replace("USDT", "").replace("USD", "") # Temizle
     
-    mesaj_giden = bot.reply_to(message, f"📡 TradingView'den <b>{coin}</b> canlı verileri çekiliyor...", parse_mode="HTML")
+    # --- ZAMAN DİLİMİ AYARLAYICI ---
+    secilen_periyot = Interval.INTERVAL_1_DAY
+    periyot_adi = "1 Günlük"
+    
+    if len(komut) > 2:
+        istek_zaman = komut[2].lower()
+        zaman_haritasi = {
+            "15m": (Interval.INTERVAL_15_MINUTES, "15 Dakikalık"),
+            "15dk": (Interval.INTERVAL_15_MINUTES, "15 Dakikalık"),
+            "1h": (Interval.INTERVAL_1_HOUR, "1 Saatlik"),
+            "1s": (Interval.INTERVAL_1_HOUR, "1 Saatlik"),
+            "4h": (Interval.INTERVAL_4_HOURS, "4 Saatlik"),
+            "4s": (Interval.INTERVAL_4_HOURS, "4 Saatlik"),
+            "1d": (Interval.INTERVAL_1_DAY, "Günlük"),
+            "1g": (Interval.INTERVAL_1_DAY, "Günlük"),
+            "1w": (Interval.INTERVAL_1_WEEK, "Haftalık"),
+            "1hft": (Interval.INTERVAL_1_WEEK, "Haftalık")
+        }
+        if istek_zaman in zaman_haritasi:
+            secilen_periyot, periyot_adi = zaman_haritasi[istek_zaman]
+
+    mesaj_giden = bot.reply_to(message, f"📡 TradingView'den <b>{coin} ({periyot_adi})</b> canlı verileri çekiliyor...", parse_mode="HTML")
 
     try:
         handler = TA_Handler(
             symbol=f"{coin}USDT", # Doğrudan Binance standart formatı
             screener="crypto",
             exchange="BINANCE",
-            interval=Interval.INTERVAL_1_DAY
+            interval=secilen_periyot
         )
         analiz = handler.get_analysis()
         
@@ -132,15 +153,15 @@ def tv_analiz(message):
         mom = round(analiz.indicators.get("Mom", 0), 2)
         ema20 = round(analiz.indicators.get("EMA20", 0), 2)
         
-        veri_ozeti = f"Sinyal: {tavsiye}, ADX: {adx}, RSI: {rsi}, Stoch: {stoch}, MACD: {macd}, CCI: {cci}, Momentum: {mom}, EMA20: {ema20}, SMA50: {sma50}, SMA200: {sma200}."
+        veri_ozeti = f"Periyot: {periyot_adi}, Sinyal: {tavsiye}, ADX: {adx}, RSI: {rsi}, Stoch: {stoch}, MACD: {macd}, CCI: {cci}, Momentum: {mom}, EMA20: {ema20}, SMA50: {sma50}, SMA200: {sma200}."
         
-        bot.edit_message_text(f"🧠 Veri geldi, Yapay Zeka yorumluyor...", chat_id=message.chat.id, message_id=mesaj_giden.message_id)
+        bot.edit_message_text(f"🧠 Veri geldi, Yapay Zeka {periyot_adi} grafiği yorumluyor...", chat_id=message.chat.id, message_id=mesaj_giden.message_id)
         
         # Zeka motorundan kısa yorumu al
         motor_adi, ai_yorumu = ai_yanit_al(veri_ozeti, analiz_mi=True)
         
         # DEVASA WALL STREET TABLOSU
-        sonuc = f"📊 <b>PRO TRADINGVIEW ANALİZİ: {coin}</b>\n"
+        sonuc = f"📊 <b>PRO TRADINGVIEW ANALİZİ: {coin}</b> ⏳ <b>({periyot_adi})</b>\n"
         sonuc += f"📈 <b>Genel Sinyal:</b> <code>{tavsiye}</code>\n"
         sonuc += f"🌊 <b>Trend Gücü (ADX):</b> <code>{adx}</code>\n"
         sonuc += f"⚡ <b>RSI:</b> <code>{rsi}</code> | <b>Stoch:</b> <code>{stoch}</code>\n"
@@ -157,7 +178,7 @@ def tv_analiz(message):
     except Exception as e:
         bot.edit_message_text(f"❌ TradingView Hatası: '{coin}USDT' Binance'de bulunamadı veya veri çekilemedi. Hata: {e}", chat_id=message.chat.id, message_id=mesaj_giden.message_id)
 
-# 💬 SOHBET VE OTOMATİK HESAPLAYICI (TASARRUF MODU)
+# 💬 SOHBET VE OTOMATİK HESAPLAYICI (TASARRUF MODU & KARİZMATİK ÇAĞRI)
 @bot.message_handler(func=lambda message: True)
 def serbest_sohbet(message):
     mesaj = message.text
@@ -166,13 +187,6 @@ def serbest_sohbet(message):
     pattern = r'(?i)\b(\d+(?:\.\d+)?)\s*(?:adet|tane)?\s*([A-Za-zÇŞĞÜÖİçşğüöı]{2,8})\b'
     match = re.search(pattern, mesaj)
     
-    # SADECE MİKTAR VE COİN YAZILDIYSA (Örn: "0.5 BNB") YAPAY ZEKAYI BOŞA YORMA!
-    sadece_hesap_mi = False
-    temiz_mesaj = re.sub(pattern, '', mesaj).strip().lower()
-    # Eğer cümlede başka kelime yoksa veya sadece "kaç tl, hesapla" gibi kelimeler varsa
-    if match and (not temiz_mesaj or len(temiz_mesaj) < 3 or temiz_mesaj in ["kaç", "kaç tl", "ne kadar", "hesapla", "kaç dolar"]):
-        sadece_hesap_mi = True 
-
     hesap_metni = ""
     if match:
         miktar = float(match.group(1))
@@ -181,7 +195,6 @@ def serbest_sohbet(message):
         hedef_coin = ozel_isimler.get(coin, coin)
         
         try:
-            # Binance'den canlı fiyat çekimi
             dolar_url = f"https://api.binance.com/api/v3/ticker/price?symbol={hedef_coin}USDT"
             dolar_resp = requests.get(dolar_url, timeout=3).json()
             if "price" in dolar_resp:
@@ -197,13 +210,30 @@ def serbest_sohbet(message):
         except:
             pass
 
-    # 2. Aşama: Eğer sadece "0.5 BNB" dendiyse YZ'yi hiç kullanma, token israfı yapma!
+    # 2. Aşama: Hızlı Hesap Radarından Çıktı mı?
+    temiz_mesaj = re.sub(pattern, '', mesaj).strip().lower()
+    sadece_hesap_mi = False
+    if match and (not temiz_mesaj or len(temiz_mesaj) < 3 or temiz_mesaj in ["kaç", "kaç tl", "ne kadar", "hesapla", "kaç dolar"]):
+        sadece_hesap_mi = True 
+
     if sadece_hesap_mi and hesap_metni:
-        bot.reply_to(message, hesap_metni.strip(), parse_mode="HTML") # Sadece hesabı verip bitir
+        bot.reply_to(message, hesap_metni.strip(), parse_mode="HTML")
         return
 
-    # 3. Aşama: Eğer normal bir sohbet cümlesiyse YZ'yi devreye sok (ve varsa hesabı da ekle)
-    mesaj_giden = bot.reply_to(message, "🧠 Emre AI Düşünüyor...")
+    # 3. Aşama: KARİZMATİK VE EŞSİZ ÇAĞRI (Sadece özel marka isimlerini duyunca konuşur)
+    # Günlük sohbette yanlışlıkla kullanılmayacak, sana özel tetikleyiciler:
+    tetikleyiciler = ["emrai", "emray", "emreai", "karargah", "asistan"]
+    mesaj_kucuk = mesaj.lower()
+    
+    # Kelimeleri tam kelime olarak aramak için (örneğin "karargahta" derse tetiklenmez, tam "karargah" demesi lazım)
+    tetiklendi_mi = any(re.search(fr'\b{kelime}\b', mesaj_kucuk) for kelime in tetikleyiciler)
+    
+    # Eğer cümlede bu özel isimler geçmiyorsa ve hızlı hesap yapılmadıysa mesajı görmezden gel (Token israfını engeller!)
+    if not tetiklendi_mi:
+        return
+
+    # 4. Aşama: Adı seslenildiyse normal sohbete gir
+    mesaj_giden = bot.reply_to(message, "🧠 Karargah Düşünüyor...")
     motor_adi, yanit = ai_yanit_al(mesaj, analiz_mi=False)
     
     sonuc = f"<blockquote>{yanit}</blockquote>\n<i>⚡ {motor_adi}</i>"
