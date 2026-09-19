@@ -1,24 +1,17 @@
 # -*- coding: utf-8 -*-
 """
-EMRE AI — V15 "ASENKRON KARARGAH"
+EMRE AI — V15 "ASENKRON KARARGAH + MENÜLÜ"
 =================================
 V14'e göre değişenler:
-  1. Tamamen ASENKRON  -> aiohttp + AsyncTeleBot. Bot artık bir cevabı beklerken donmuyor.
-  2. HAFIZA            -> Her sohbet için son N mesaj tutuluyor (TTL'li, RAM dostu).
-  3. CONTEXT INJECTION -> Sohbette coin geçerse canlı fiyat + Fear&Greed modele enjekte edilir.
-                          Model artık fiyat uyduramaz (halüsinasyon biter).
-  4. PİYASA HİSSİ      -> Fear & Greed Index, Long/Short oranı, Funding Rate.
-  5. DEVRE KESİCİ      -> Çöken motor 90 sn cezalı; her istekte tekrar denenip zaman kaybedilmez.
-  6. GERÇEK SEMBOL     -> Binance exchangeInfo ile doğrulama. "5 tane elma" artık coin sanılmıyor.
+  1. Tamamen ASENKRON  -> aiohttp + AsyncTeleBot.
+  2. HAFIZA            -> Her sohbet için son N mesaj tutuluyor.
+  3. CONTEXT INJECTION -> Modele anlık fiyat sızdırılır.
+  4. PİYASA HİSSİ      -> Fear & Greed Index, Long/Short oranı.
+  5. DEVRE KESİCİ      -> Çöken motor 90 sn cezalı.
+  6. GERÇEK SEMBOL     -> Binance exchangeInfo ile doğrulama.
   7. RATE LIMIT        -> Kullanıcı başına flood koruması.
-  8. TradingView       -> Bloklayan kütüphane thread'e alındı, event loop'u kilitlemiyor.
-
-Kurulum:
-    pip install pyTelegramBotAPI aiohttp tradingview-ta
-
-Ortam değişkenleri (zorunlu olan sadece ilki):
-    EMRE_BOT_TOKEN, DEEPSEEK_API_KEY, GROQ_API_KEY, NVIDIA_NIM_API_KEY,
-    MISTRAL_API_KEY, XAI_API_KEY, GEMINI_API_KEY
+  8. TradingView       -> Ayrı thread'de çalışır.
+  9. MENÜ ENTEGRASYONU -> Telegram / menüsü otomatik yüklenir.
 """
 
 import asyncio
@@ -33,6 +26,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import aiohttp
 from telebot.async_telebot import AsyncTeleBot
+from telebot.types import BotCommand
 from tradingview_ta import TA_Handler, Interval
 
 # ----------------------------------------------------------------------------
@@ -51,21 +45,20 @@ logging.basicConfig(
 )
 log = logging.getLogger("emre-ai")
 
-HAFIZA_UZUNLUGU = 8          # kaç mesaj hatırlansın (4 soru + 4 cevap)
-HAFIZA_TTL = 30 * 60         # 30 dk konuşmazsanız hafıza silinir
-MOTOR_TIMEOUT = 12           # tek bir AI motoru için saniye
-MOTOR_CEZA_SURESI = 90       # çöken motor kaç saniye kenarda bekletilsin
-KULLANICI_BEKLEME = 4        # aynı kullanıcı kaç saniyede bir AI çağırabilir
+HAFIZA_UZUNLUGU = 8          
+HAFIZA_TTL = 30 * 60         
+MOTOR_TIMEOUT = 12           
+MOTOR_CEZA_SURESI = 90       
+KULLANICI_BEKLEME = 4        
 TETIKLEYICILER = ["emrai", "emray", "emreai", "karargah", "asistan"]
 
-TELEGRAM_LIMIT = 3900        # 4096'nın güvenli altı
+TELEGRAM_LIMIT = 3900        
 
 # ----------------------------------------------------------------------------
-# ORTAK HTTP OTURUMU (her istekte yeni bağlantı açmak yerine havuz kullanılır)
+# ORTAK HTTP OTURUMU
 # ----------------------------------------------------------------------------
 
 _session: Optional[aiohttp.ClientSession] = None
-
 
 async def oturum() -> aiohttp.ClientSession:
     global _session
@@ -77,9 +70,7 @@ async def oturum() -> aiohttp.ClientSession:
         )
     return _session
 
-
 async def json_getir(url: str, timeout: float = 5.0, **kw) -> Optional[Any]:
-    """Hata fırlatmayan GET. Başarısızsa None döner."""
     try:
         s = await oturum()
         async with s.get(url, timeout=aiohttp.ClientTimeout(total=timeout), **kw) as r:
@@ -90,9 +81,8 @@ async def json_getir(url: str, timeout: float = 5.0, **kw) -> Optional[Any]:
         log.debug("GET basarisiz %s -> %s", url, e)
         return None
 
-
 # ----------------------------------------------------------------------------
-# TTL CACHE — aynı veriyi saniyede 40 kez çekmemek için
+# TTL CACHE
 # ----------------------------------------------------------------------------
 
 class TTLCache:
@@ -114,12 +104,10 @@ class TTLCache:
         self._d[key] = (time.time(), value)
         return value
 
-
-fiyat_cache = TTLCache(10)        # 10 sn
-duygu_cache = TTLCache(600)       # 10 dk
-oran_cache = TTLCache(300)        # 5 dk
-sembol_cache = TTLCache(12 * 3600)  # 12 saat
-
+fiyat_cache = TTLCache(10)        
+duygu_cache = TTLCache(600)       
+oran_cache = TTLCache(300)        
+sembol_cache = TTLCache(12 * 3600)  
 
 # ----------------------------------------------------------------------------
 # HTML ZIRHI + MESAJ BÖLÜCÜ
@@ -129,9 +117,7 @@ def html_temizle(metin: str) -> str:
     metin = re.sub(r"[*_`]+", "", metin or "")
     return html.escape(metin.strip())
 
-
 def parcala(metin: str, limit: int = TELEGRAM_LIMIT) -> List[str]:
-    """Uzun cevabı Telegram limitine göre satır sınırlarından böler."""
     if len(metin) <= limit:
         return [metin]
     parcalar, tampon = [], ""
@@ -145,9 +131,7 @@ def parcala(metin: str, limit: int = TELEGRAM_LIMIT) -> List[str]:
         parcalar.append(tampon)
     return parcalar
 
-
 async def guvenli_duzenle(chat_id: int, message_id: int, metin: str) -> None:
-    """edit_message_text'i HTML hatasına ve uzunluğa karşı korur."""
     parcalar = parcala(metin)
     try:
         await bot.edit_message_text(parcalar[0], chat_id=chat_id, message_id=message_id)
@@ -165,9 +149,8 @@ async def guvenli_duzenle(chat_id: int, message_id: int, metin: str) -> None:
         except Exception:
             pass
 
-
 # ----------------------------------------------------------------------------
-# HAFIZA — botun "amnezisi" burada bitiyor
+# HAFIZA
 # ----------------------------------------------------------------------------
 
 @dataclass
@@ -175,14 +158,12 @@ class Konusma:
     mesajlar: deque = field(default_factory=lambda: deque(maxlen=HAFIZA_UZUNLUGU))
     son_erisim: float = field(default_factory=time.time)
 
-
 class Hafiza:
     def __init__(self):
         self._depo: Dict[str, Konusma] = {}
 
     @staticmethod
     def _anahtar(chat_id: int, user_id: int) -> str:
-        # Grupta herkesin hafızası ayrı: sohbetler birbirine karışmaz
         return f"{chat_id}:{user_id}"
 
     def ekle(self, chat_id: int, user_id: int, rol: str, icerik: str) -> None:
@@ -210,16 +191,13 @@ class Hafiza:
         for k in olu:
             self._depo.pop(k, None)
 
-
 hafiza = Hafiza()
 
-
 # ----------------------------------------------------------------------------
-# PİYASA VERİSİ — fiyat, korku/açgözlülük, long/short, funding
+# PİYASA VERİSİ
 # ----------------------------------------------------------------------------
 
 async def binance_sembolleri() -> set:
-    """USDT paritesi olan gerçek coin listesi. Regex'in yanlış coin yakalamasını engeller."""
     onbellek = sembol_cache.get("semboller")
     if onbellek:
         return onbellek
@@ -229,10 +207,9 @@ async def binance_sembolleri() -> set:
         for s in veri["symbols"]:
             if s.get("quoteAsset") == "USDT" and s.get("status") == "TRADING":
                 semboller.add(s["baseAsset"].upper())
-    if not semboller:  # ağ çöktüyse en azından majörler
+    if not semboller:
         semboller = {"BTC", "ETH", "BNB", "SOL", "XRP", "TRX", "AVAX", "DOGE", "ADA", "PAXG"}
     return sembol_cache.set("semboller", semboller)
-
 
 async def fiyat_getir(coin: str) -> Optional[Dict[str, float]]:
     coin = coin.upper()
@@ -251,7 +228,6 @@ async def fiyat_getir(coin: str) -> Optional[Dict[str, float]]:
     }
     return fiyat_cache.set(coin, sonuc)
 
-
 async def usdt_try() -> float:
     onbellek = fiyat_cache.get("__USDTTRY")
     if onbellek:
@@ -259,7 +235,6 @@ async def usdt_try() -> float:
     veri = await json_getir("https://api.binance.com/api/v3/ticker/price?symbol=USDTTRY", timeout=4)
     kur = float(veri["price"]) if veri and "price" in veri else 0.0
     return fiyat_cache.set("__USDTTRY", kur) if kur else 0.0
-
 
 async def korku_acgozluluk() -> Optional[Dict[str, str]]:
     onbellek = duygu_cache.get("fng")
@@ -277,7 +252,6 @@ async def korku_acgozluluk() -> Optional[Dict[str, str]]:
         return duygu_cache.set("fng", sonuc)
     except Exception:
         return None
-
 
 async def long_short(coin: str) -> Optional[Dict[str, float]]:
     coin = coin.upper()
@@ -299,7 +273,6 @@ async def long_short(coin: str) -> Optional[Dict[str, float]]:
     except Exception:
         return None
 
-
 async def funding(coin: str) -> Optional[float]:
     veri = await json_getir(
         f"https://fapi.binance.com/fapi/v1/premiumIndex?symbol={coin.upper()}USDT", timeout=5
@@ -309,17 +282,12 @@ async def funding(coin: str) -> Optional[float]:
     except Exception:
         return None
 
-
 async def piyasa_konteksti(mesaj: str) -> str:
-    """
-    Mesajda geçen coinlerin CANLI fiyatını + piyasa duygusunu toplar ve
-    modele 'sistem bilgisi' olarak enjekte edilecek metni üretir.
-    """
     semboller = await binance_sembolleri()
     adaylar = {k.upper() for k in re.findall(r"[A-Za-z]{2,10}", mesaj)}
     bulunan = [c for c in adaylar if c in semboller][:4]
     if not bulunan:
-        bulunan = ["BTC"]  # hiçbir coin geçmiyorsa en azından piyasanın nabzı
+        bulunan = ["BTC"] 
 
     gorevler = [fiyat_getir(c) for c in bulunan] + [korku_acgozluluk(), long_short(bulunan[0])]
     sonuclar = await asyncio.gather(*gorevler, return_exceptions=True)
@@ -347,9 +315,8 @@ async def piyasa_konteksti(mesaj: str) -> str:
         + "\n".join(satirlar)
     )
 
-
 # ----------------------------------------------------------------------------
-# YAPAY ZEKA AĞI — devre kesicili, asenkron, hafızalı
+# YAPAY ZEKA AĞI
 # ----------------------------------------------------------------------------
 
 @dataclass
@@ -359,7 +326,6 @@ class Motor:
     env: str
     model: str
     tip: str = "openai"
-
 
 MOTORLAR: List[Motor] = [
     Motor("DEEPSEEK", "https://api.deepseek.com/chat/completions", "DEEPSEEK_API_KEY", "deepseek-chat"),
@@ -371,13 +337,10 @@ MOTORLAR: List[Motor] = [
           "GEMINI_API_KEY", "gemini-1.5-flash", tip="gemini"),
 ]
 
-# Çöken motorun ne zamana kadar cezalı olduğu
 _ceza: Dict[str, float] = defaultdict(float)
-
 
 def _cezali_mi(isim: str) -> bool:
     return time.time() < _ceza[isim]
-
 
 async def _motor_cagir(motor: Motor, mesajlar: List[Dict[str, str]], api_key: str) -> str:
     s = await oturum()
@@ -409,7 +372,6 @@ async def _motor_cagir(motor: Motor, mesajlar: List[Dict[str, str]], api_key: st
             raise RuntimeError(f"HTTP {r.status}")
         veri = await r.json()
         return veri["choices"][0]["message"]["content"]
-
 
 async def ai_yanit_al(
     mesaj: str,
@@ -462,13 +424,11 @@ async def ai_yanit_al(
     log.error("Tum motorlar dustu: %s", " | ".join(hatalar))
     return "HATA", "Zeka motorlarının hepsi şu an meşgul. Birkaç saniye sonra tekrar dene."
 
-
 # ----------------------------------------------------------------------------
 # FLOOD KORUMASI
 # ----------------------------------------------------------------------------
 
 _son_istek: Dict[int, float] = defaultdict(float)
-
 
 def cok_hizli_mi(user_id: int) -> bool:
     simdi = time.time()
@@ -476,7 +436,6 @@ def cok_hizli_mi(user_id: int) -> bool:
         return True
     _son_istek[user_id] = simdi
     return False
-
 
 # ----------------------------------------------------------------------------
 # KOMUTLAR
@@ -495,12 +454,10 @@ async def ana_menu(message):
     )
     await bot.reply_to(message, metin)
 
-
 @bot.message_handler(commands=["unut"])
 async def unut(message):
     hafiza.temizle(message.chat.id, message.from_user.id)
     await bot.reply_to(message, "🧹 Tamam, aramızda konuşulanları unuttum. Sıfırdan başlıyoruz.")
-
 
 @bot.message_handler(commands=["duygu", "korku"])
 async def duygu_komutu(message):
@@ -525,7 +482,6 @@ async def duygu_komutu(message):
     if len(satir) == 1:
         satir.append("Veri kaynaklarına şu an ulaşılamıyor.")
     await bot.reply_to(message, "\n".join(satir))
-
 
 @bot.message_handler(commands=["piyasa"])
 async def piyasa_durumu(message):
@@ -556,7 +512,6 @@ async def piyasa_durumu(message):
     )
     await bot.reply_to(message, metin)
 
-
 ZAMAN_HARITASI = {
     "15m": (Interval.INTERVAL_15_MINUTES, "15 Dakikalık"),
     "15dk": (Interval.INTERVAL_15_MINUTES, "15 Dakikalık"),
@@ -570,9 +525,7 @@ ZAMAN_HARITASI = {
     "1hft": (Interval.INTERVAL_1_WEEK, "Haftalık"),
 }
 
-
 def _tv_cek(coin: str, periyot) -> Dict[str, Any]:
-    """Bloklayan tradingview_ta çağrısı — ayrı thread'de çalıştırılır."""
     handler = TA_Handler(
         symbol=f"{coin}USDT", screener="crypto", exchange="BINANCE", interval=periyot
     )
@@ -588,7 +541,6 @@ def _tv_cek(coin: str, periyot) -> Dict[str, Any]:
         "EMA20": g.get("EMA20", 0), "SMA50": g.get("SMA50", 0), "SMA200": g.get("SMA200", 0),
         "kapanis": g.get("close", 0),
     }
-
 
 @bot.message_handler(commands=["analiz"])
 async def tv_analiz(message):
@@ -607,7 +559,6 @@ async def tv_analiz(message):
     )
 
     try:
-        # TradingView + piyasa duygusu AYNI ANDA çekilir
         tv, fng, ls, fr = await asyncio.gather(
             asyncio.to_thread(_tv_cek, coin, periyot),
             korku_acgozluluk(),
@@ -672,7 +623,6 @@ async def tv_analiz(message):
     )
     await guvenli_duzenle(message.chat.id, bekleme.message_id, sonuc)
 
-
 # ----------------------------------------------------------------------------
 # SERBEST SOHBET + HIZLI HESAP
 # ----------------------------------------------------------------------------
@@ -681,9 +631,7 @@ MIKTAR_DESENI = re.compile(
     r"(?i)\b(\d+(?:[.,]\d+)?)\s*(?:adet|tane)?\s*([A-Za-z]{2,10})\b"
 )
 
-
 async def hizli_hesap(mesaj: str) -> Tuple[str, bool]:
-    """Mesajda 'miktar + coin' varsa AI'ı hiç uyandırmadan hesaplar."""
     eslesme = MIKTAR_DESENI.search(mesaj)
     if not eslesme:
         return "", False
@@ -717,18 +665,15 @@ async def hizli_hesap(mesaj: str) -> Tuple[str, bool]:
     }
     return metin, sadece_hesap
 
-
 @bot.message_handler(func=lambda m: bool(m.text))
 async def serbest_sohbet(message):
     mesaj = message.text
 
-    # 1) Hızlı hesap radarı — token harcamaz
     hesap_metni, sadece_hesap = await hizli_hesap(mesaj)
     if hesap_metni and sadece_hesap:
         await bot.reply_to(message, hesap_metni)
         return
 
-    # 2) Karizmatik çağrı — adı anılmadıysa ve cevap verilmiyorsa sus
     mesaj_kucuk = mesaj.lower()
     cagrildi = any(re.search(rf"\b{k}\b", mesaj_kucuk) for k in TETIKLEYICILER)
     yanit_mi = bool(
@@ -744,8 +689,6 @@ async def serbest_sohbet(message):
         return
 
     bekleme = await bot.reply_to(message, "🧠 Karargah düşünüyor...")
-
-    # 3) CONTEXT INJECTION — modele canlı fiyatı sızdır, halüsinasyonu öldür
     kontekst = await piyasa_konteksti(mesaj)
 
     motor_adi, yanit = await ai_yanit_al(
@@ -760,13 +703,11 @@ async def serbest_sohbet(message):
         sonuc += f"\n\n{hesap_metni}"
     await guvenli_duzenle(message.chat.id, bekleme.message_id, sonuc)
 
-
 # ----------------------------------------------------------------------------
-# ARKA PLAN GÖREVİ + BAŞLATICI
+# ARKA PLAN GÖREVİ + BAŞLATICI + MENÜ KURULUMU
 # ----------------------------------------------------------------------------
 
 async def bakimci():
-    """Hafızayı periyodik temizler, sembol listesini sıcak tutar."""
     while True:
         try:
             hafiza.budama()
@@ -775,10 +716,25 @@ async def bakimci():
             log.debug("Bakim hatasi: %s", e)
         await asyncio.sleep(600)
 
-
 async def main():
     await binance_sembolleri()
     asyncio.create_task(bakimci())
+    
+    # --- MENÜYÜ BURAYA EKLİYORUZ ---
+    try:
+        komutlar = [
+            BotCommand("start", "👑 Ana menü ve komut listesi"),
+            BotCommand("analiz", "📊 Canlı TradingView sinyali (örn: /analiz BTC 1s)"),
+            BotCommand("piyasa", "🚀 En çok yükselen ve düşen coinler"),
+            BotCommand("duygu", "😨 Korku/Açgözlülük ve Long/Short oranı"),
+            BotCommand("unut", "🧹 Sohbet hafızasını temizler")
+        ]
+        await bot.set_my_commands(komutlar)
+        log.info("Telegram komut menüsü basariyla ayarlandi.")
+    except Exception as e:
+        log.warning("Menu ayarlanamadi: %s", e)
+    # -------------------------------
+
     aktif = [m.isim for m in MOTORLAR if os.environ.get(m.env)]
     log.info("Emre AI V15 ayakta. Aktif motorlar: %s", ", ".join(aktif) or "YOK")
     try:
@@ -786,7 +742,6 @@ async def main():
     finally:
         if _session and not _session.closed:
             await _session.close()
-
 
 if __name__ == "__main__":
     asyncio.run(main())
