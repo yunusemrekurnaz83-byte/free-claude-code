@@ -1,249 +1,792 @@
-import telebot
-import os
-import requests
-import financedatabase as fd
-from tradingview_ta import TA_Handler, Interval
+# -*- coding: utf-8 -*-
+"""
+EMRE AI — V15 "ASENKRON KARARGAH"
+=================================
+V14'e göre değişenler:
+  1. Tamamen ASENKRON  -> aiohttp + AsyncTeleBot. Bot artık bir cevabı beklerken donmuyor.
+  2. HAFIZA            -> Her sohbet için son N mesaj tutuluyor (TTL'li, RAM dostu).
+  3. CONTEXT INJECTION -> Sohbette coin geçerse canlı fiyat + Fear&Greed modele enjekte edilir.
+                          Model artık fiyat uyduramaz (halüsinasyon biter).
+  4. PİYASA HİSSİ      -> Fear & Greed Index, Long/Short oranı, Funding Rate.
+  5. DEVRE KESİCİ      -> Çöken motor 90 sn cezalı; her istekte tekrar denenip zaman kaybedilmez.
+  6. GERÇEK SEMBOL     -> Binance exchangeInfo ile doğrulama. "5 tane elma" artık coin sanılmıyor.
+  7. RATE LIMIT        -> Kullanıcı başına flood koruması.
+  8. TradingView       -> Bloklayan kütüphane thread'e alındı, event loop'u kilitlemiyor.
+
+Kurulum:
+    pip install pyTelegramBotAPI aiohttp tradingview-ta
+
+Ortam değişkenleri (zorunlu olan sadece ilki):
+    EMRE_BOT_TOKEN, DEEPSEEK_API_KEY, GROQ_API_KEY, NVIDIA_NIM_API_KEY,
+    MISTRAL_API_KEY, XAI_API_KEY, GEMINI_API_KEY
+"""
+
+import asyncio
 import html
+import logging
+import os
 import re
+import time
+from collections import defaultdict, deque
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Tuple
 
-# ŞİFRELER
-TOKEN = os.environ.get("EMRE_BOT_TOKEN") 
-bot = telebot.TeleBot(TOKEN)
+import aiohttp
+from telebot.async_telebot import AsyncTeleBot
+from tradingview_ta import TA_Handler, Interval
 
-# 🛡️ TELEGRAM ÇÖKÜŞ ÖNLEYİCİ (HTML ZIRHI)
-def html_temizle(metin):
-    # Yapay zekadan gelen metni HTML formatına uygun hale getirir (çökmesini engeller)
-    metin = metin.replace("*", "").replace("_", "").replace("`", "")
-    return html.escape(metin)
+# ----------------------------------------------------------------------------
+# AYARLAR
+# ----------------------------------------------------------------------------
 
-# 🧠 6 MOTORLU YENİLMEZ YAPAY ZEKA AĞI
-def ai_yanit_al(mesaj, analiz_mi=False):
-    hata_raporu = []
-    
-    # Motorlar (DEEPSEEK 1 NUMARALI ANA BEYİN)
-    motorlar = [
-        ("DEEPSEEK", "https://api.deepseek.com/chat/completions", "DEEPSEEK_API_KEY", "deepseek-chat"),
-        ("GROQ", "https://api.groq.com/openai/v1/chat/completions", "GROQ_API_KEY", "llama-3.1-8b-instant"),
-        ("NVIDIA", "https://integrate.api.nvidia.com/v1/chat/completions", "NVIDIA_NIM_API_KEY", "meta/llama-3.1-8b-instruct"),
-        ("MISTRAL", "https://api.mistral.ai/v1/chat/completions", "MISTRAL_API_KEY", "mistral-tiny"),
-        ("XAI", "https://api.x.ai/v1/chat/completions", "XAI_API_KEY", "grok-beta")
-    ]
+TOKEN = os.environ.get("EMRE_BOT_TOKEN")
+if not TOKEN:
+    raise SystemExit("EMRE_BOT_TOKEN tanimli degil. Once token'i ortam degiskenine ekle.")
 
-    if analiz_mi:
-        sistem_mesaji = "Sen usta bir kripto analistisin. Sana verilen göstergeleri kullanarak, sadece 2 cümlelik, kısa, net ve keskin bir strateji ver. Kesinlikle destan yazma."
-    else:
-        sistem_mesaji = "Sen Emre AI'sın. Kullanıcı selam verirse sıcak bir şekilde selam al. Sohbet etmek isterse kısa, net, samimi kripto sohbeti yap. Şaka yapabilirsin ama uzatma."
+bot = AsyncTeleBot(TOKEN, parse_mode="HTML")
 
-    for isim, url, env_adi, model in motorlar:
-        api_key = os.environ.get(env_adi)
-        if not api_key:
-            continue
-            
-        try:
-            headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-            data = {
-                "model": model,
-                "messages": [{"role": "system", "content": sistem_mesaji}, {"role": "user", "content": mesaj}]
-            }
-            resp = requests.post(url, headers=headers, json=data, timeout=12)
-            if resp.status_code == 200:
-                yanit = resp.json()["choices"][0]["message"]["content"]
-                return isim, html_temizle(yanit)
-            else:
-                hata_raporu.append(f"{isim}({resp.status_code})")
-        except Exception:
-            hata_raporu.append(f"{isim}(Timeout)")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)-7s | %(message)s",
+)
+log = logging.getLogger("emre-ai")
 
-    # Son Çare: GEMINI
-    gemini_key = os.environ.get("GEMINI_API_KEY")
-    if gemini_key:
-        try:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={gemini_key}"
-            gemini_prompt = f"{sistem_mesaji} Soru: {mesaj}"
-            data = {"contents": [{"parts": [{"text": gemini_prompt}]}]}
-            resp = requests.post(url, headers={"Content-Type": "application/json"}, json=data, timeout=12)
-            if resp.status_code == 200:
-                yanit = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
-                return "GEMINI", html_temizle(yanit)
-            else:
-                hata_raporu.append(f"GEMINI({resp.status_code})")
-        except Exception:
-            hata_raporu.append("GEMINI(Timeout)")
+HAFIZA_UZUNLUGU = 8          # kaç mesaj hatırlansın (4 soru + 4 cevap)
+HAFIZA_TTL = 30 * 60         # 30 dk konuşmazsanız hafıza silinir
+MOTOR_TIMEOUT = 12           # tek bir AI motoru için saniye
+MOTOR_CEZA_SURESI = 90       # çöken motor kaç saniye kenarda bekletilsin
+KULLANICI_BEKLEME = 4        # aynı kullanıcı kaç saniyede bir AI çağırabilir
+TETIKLEYICILER = ["emrai", "emray", "emreai", "karargah", "asistan"]
 
-    detay = " | ".join(hata_raporu)
-    return "HATA", f"Zeka Motorları Çöktü! {detay}"
+TELEGRAM_LIMIT = 3900        # 4096'nın güvenli altı
 
-@bot.message_handler(commands=['start'])
-def ana_menu(message):
-    mesaj = "<b>👑 EMRE AI MERKEZ KARARGAHI</b>\n\nKomutlar:\n/piyasa - Genel Liste\n/analiz BTC - Canlı TradingView Sinyali"
-    bot.reply_to(message, mesaj, parse_mode="HTML")
+# ----------------------------------------------------------------------------
+# ORTAK HTTP OTURUMU (her istekte yeni bağlantı açmak yerine havuz kullanılır)
+# ----------------------------------------------------------------------------
 
-@bot.message_handler(commands=['piyasa'])
-def piyasa_durumu(message):
-    komut = message.text.split()
-    bot.reply_to(message, "📊 Veritabanı Taranıyor...")
-    try:
-        veri = fd.Cryptos().select()
-        if len(komut) > 1:
-            aranan = komut[1].upper()
-            if aranan in veri.index:
-                isim = veri.loc[aranan, 'name']
-                bot.send_message(message.chat.id, f"✅ BULUNDU!\nSembol: <b>{aranan}</b>\nAdı: <i>{isim}</i>", parse_mode="HTML")
-            else:
-                bot.send_message(message.chat.id, f"❌ '{aranan}' veritabanında bulunamadı. Lütfen /analiz komutunu kullanın.")
-        else:
-            liste = list(veri.index)[:10]
-            bot.send_message(message.chat.id, f"🚨 <b>Sistemdeki İlk 10 Varlık:</b>\n{', '.join(liste)}", parse_mode="HTML")
-    except Exception as e:
-        bot.reply_to(message, f"❌ Veritabanı Hatası: {e}")
+_session: Optional[aiohttp.ClientSession] = None
 
-# 📈 TRADINGVIEW CANLI VERİ ÇEKİCİ (TAM ENTEGRE V14)
-@bot.message_handler(commands=['analiz'])
-def tv_analiz(message):
-    komut = message.text.split()
-    if len(komut) < 2:
-        bot.reply_to(message, "Kral hangi coini inceleyeyim? Örnek: /analiz BTC 1s (veya 15dk, 4s, 1g)")
-        return
 
-    # USDT çifti zorunlu yapılıyor (Binance'de çalışması için)
-    coin_ham = komut[1].upper()
-    coin = coin_ham.replace("USDT", "").replace("USD", "") # Temizle
-    
-    # --- ZAMAN DİLİMİ AYARLAYICI ---
-    secilen_periyot = Interval.INTERVAL_1_DAY
-    periyot_adi = "1 Günlük"
-    
-    if len(komut) > 2:
-        istek_zaman = komut[2].lower()
-        zaman_haritasi = {
-            "15m": (Interval.INTERVAL_15_MINUTES, "15 Dakikalık"),
-            "15dk": (Interval.INTERVAL_15_MINUTES, "15 Dakikalık"),
-            "1h": (Interval.INTERVAL_1_HOUR, "1 Saatlik"),
-            "1s": (Interval.INTERVAL_1_HOUR, "1 Saatlik"),
-            "4h": (Interval.INTERVAL_4_HOURS, "4 Saatlik"),
-            "4s": (Interval.INTERVAL_4_HOURS, "4 Saatlik"),
-            "1d": (Interval.INTERVAL_1_DAY, "Günlük"),
-            "1g": (Interval.INTERVAL_1_DAY, "Günlük"),
-            "1w": (Interval.INTERVAL_1_WEEK, "Haftalık"),
-            "1hft": (Interval.INTERVAL_1_WEEK, "Haftalık")
-        }
-        if istek_zaman in zaman_haritasi:
-            secilen_periyot, periyot_adi = zaman_haritasi[istek_zaman]
-
-    mesaj_giden = bot.reply_to(message, f"📡 TradingView'den <b>{coin} ({periyot_adi})</b> canlı verileri çekiliyor...", parse_mode="HTML")
-
-    try:
-        handler = TA_Handler(
-            symbol=f"{coin}USDT", # Doğrudan Binance standart formatı
-            screener="crypto",
-            exchange="BINANCE",
-            interval=secilen_periyot
+async def oturum() -> aiohttp.ClientSession:
+    global _session
+    if _session is None or _session.closed:
+        _session = aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=20),
+            connector=aiohttp.TCPConnector(limit=60, ttl_dns_cache=300),
+            headers={"User-Agent": "EmreAI/15.0"},
         )
-        analiz = handler.get_analysis()
-        
-        # Göstergeler
-        tavsiye = analiz.summary.get("RECOMMENDATION", "BİLİNMİYOR")
-        adx = round(analiz.indicators.get("ADX", 0), 2)
-        rsi = round(analiz.indicators.get("RSI", 0), 2)
-        macd = round(analiz.indicators.get("MACD.macd", 0), 2)
-        sma50 = round(analiz.indicators.get("SMA50", 0), 2)
-        sma200 = round(analiz.indicators.get("SMA200", 0), 2)
-        stoch = round(analiz.indicators.get("Stoch.K", 0), 2)
-        cci = round(analiz.indicators.get("CCI20", 0), 2)
-        mom = round(analiz.indicators.get("Mom", 0), 2)
-        ema20 = round(analiz.indicators.get("EMA20", 0), 2)
-        
-        veri_ozeti = f"Periyot: {periyot_adi}, Sinyal: {tavsiye}, ADX: {adx}, RSI: {rsi}, Stoch: {stoch}, MACD: {macd}, CCI: {cci}, Momentum: {mom}, EMA20: {ema20}, SMA50: {sma50}, SMA200: {sma200}."
-        
-        bot.edit_message_text(f"🧠 Veri geldi, Yapay Zeka {periyot_adi} grafiği yorumluyor...", chat_id=message.chat.id, message_id=mesaj_giden.message_id)
-        
-        # Zeka motorundan kısa yorumu al
-        motor_adi, ai_yorumu = ai_yanit_al(veri_ozeti, analiz_mi=True)
-        
-        # DEVASA WALL STREET TABLOSU
-        sonuc = f"📊 <b>PRO TRADINGVIEW ANALİZİ: {coin}</b> ⏳ <b>({periyot_adi})</b>\n"
-        sonuc += f"📈 <b>Genel Sinyal:</b> <code>{tavsiye}</code>\n"
-        sonuc += f"🌊 <b>Trend Gücü (ADX):</b> <code>{adx}</code>\n"
-        sonuc += f"⚡ <b>RSI:</b> <code>{rsi}</code> | <b>Stoch:</b> <code>{stoch}</code>\n"
-        sonuc += f"🌀 <b>MACD:</b> <code>{macd}</code> | <b>CCI:</b> <code>{cci}</code>\n"
-        sonuc += f"🚀 <b>Momentum:</b> <code>{mom}</code>\n"
-        sonuc += f"🎯 <b>EMA20:</b> <code>{ema20}</code>\n"
-        sonuc += f"🛡️ <b>SMA50:</b> <code>{sma50}</code> | <b>SMA200:</b> <code>{sma200}</code>\n\n"
-        sonuc += f"🤖 <b>EMRE AI YORUMU:</b>\n"
-        sonuc += f"<blockquote>⚡ [{motor_adi}] Strateji:\n\n{ai_yorumu}</blockquote>\n"
-        sonuc += f"<i>⚠️ YTD (Yatırım Tavsiyesi Değildir)</i>"
-        
-        bot.edit_message_text(sonuc, chat_id=message.chat.id, message_id=mesaj_giden.message_id, parse_mode="HTML")
+    return _session
 
+
+async def json_getir(url: str, timeout: float = 5.0, **kw) -> Optional[Any]:
+    """Hata fırlatmayan GET. Başarısızsa None döner."""
+    try:
+        s = await oturum()
+        async with s.get(url, timeout=aiohttp.ClientTimeout(total=timeout), **kw) as r:
+            if r.status != 200:
+                return None
+            return await r.json(content_type=None)
     except Exception as e:
-        bot.edit_message_text(f"❌ TradingView Hatası: '{coin}USDT' Binance'de bulunamadı veya veri çekilemedi. Hata: {e}", chat_id=message.chat.id, message_id=mesaj_giden.message_id)
+        log.debug("GET basarisiz %s -> %s", url, e)
+        return None
 
-# 💬 SOHBET VE OTOMATİK HESAPLAYICI (TASARRUF MODU & KARİZMATİK ÇAĞRI)
-@bot.message_handler(func=lambda message: True)
-def serbest_sohbet(message):
-    mesaj = message.text
-    
-    # 1. Aşama: RADAR (Sayı + Coin İsmi var mı?)
-    pattern = r'(?i)\b(\d+(?:\.\d+)?)\s*(?:adet|tane)?\s*([A-Za-zÇŞĞÜÖİçşğüöı]{2,8})\b'
-    match = re.search(pattern, mesaj)
-    
-    hesap_metni = ""
-    if match:
-        miktar = float(match.group(1))
-        coin = match.group(2).upper()
-        ozel_isimler = {"ALTIN": "PAXG", "GOLD": "PAXG", "GUMUS": "XAG", "GÜMÜŞ": "XAG"}
-        hedef_coin = ozel_isimler.get(coin, coin)
-        
+
+# ----------------------------------------------------------------------------
+# TTL CACHE — aynı veriyi saniyede 40 kez çekmemek için
+# ----------------------------------------------------------------------------
+
+class TTLCache:
+    def __init__(self, ttl: float):
+        self.ttl = ttl
+        self._d: Dict[str, Tuple[float, Any]] = {}
+
+    def get(self, key: str) -> Optional[Any]:
+        kayit = self._d.get(key)
+        if not kayit:
+            return None
+        zaman, deger = kayit
+        if time.time() - zaman > self.ttl:
+            self._d.pop(key, None)
+            return None
+        return deger
+
+    def set(self, key: str, value: Any) -> Any:
+        self._d[key] = (time.time(), value)
+        return value
+
+
+fiyat_cache = TTLCache(10)        # 10 sn
+duygu_cache = TTLCache(600)       # 10 dk
+oran_cache = TTLCache(300)        # 5 dk
+sembol_cache = TTLCache(12 * 3600)  # 12 saat
+
+
+# ----------------------------------------------------------------------------
+# HTML ZIRHI + MESAJ BÖLÜCÜ
+# ----------------------------------------------------------------------------
+
+def html_temizle(metin: str) -> str:
+    metin = re.sub(r"[*_`]+", "", metin or "")
+    return html.escape(metin.strip())
+
+
+def parcala(metin: str, limit: int = TELEGRAM_LIMIT) -> List[str]:
+    """Uzun cevabı Telegram limitine göre satır sınırlarından böler."""
+    if len(metin) <= limit:
+        return [metin]
+    parcalar, tampon = [], ""
+    for satir in metin.split("\n"):
+        if len(tampon) + len(satir) + 1 > limit:
+            parcalar.append(tampon)
+            tampon = satir
+        else:
+            tampon = f"{tampon}\n{satir}" if tampon else satir
+    if tampon:
+        parcalar.append(tampon)
+    return parcalar
+
+
+async def guvenli_duzenle(chat_id: int, message_id: int, metin: str) -> None:
+    """edit_message_text'i HTML hatasına ve uzunluğa karşı korur."""
+    parcalar = parcala(metin)
+    try:
+        await bot.edit_message_text(parcalar[0], chat_id=chat_id, message_id=message_id)
+    except Exception:
         try:
-            dolar_url = f"https://api.binance.com/api/v3/ticker/price?symbol={hedef_coin}USDT"
-            dolar_resp = requests.get(dolar_url, timeout=3).json()
-            if "price" in dolar_resp:
-                fiyat_usd = float(dolar_resp["price"])
-                kur_url = "https://api.binance.com/api/v3/ticker/price?symbol=USDTTRY"
-                kur_resp = requests.get(kur_url, timeout=3).json()
-                usdt_tl = float(kur_resp["price"]) if "price" in kur_resp else 34.0
-                
-                toplam_usd = miktar * fiyat_usd
-                toplam_tl = toplam_usd * usdt_tl
-                
-                hesap_metni = f"\n\n🧮 <b>HIZLI HESAP ({miktar} {coin}):</b>\n💵 <b>${toplam_usd:,.2f}</b> (USDT)\n🇹🇷 <b>₺{toplam_tl:,.2f}</b> (TL)"
-        except:
+            await bot.edit_message_text(
+                html.escape(re.sub(r"<[^>]+>", "", parcalar[0])),
+                chat_id=chat_id, message_id=message_id, parse_mode=None,
+            )
+        except Exception as e:
+            log.warning("Mesaj duzenlenemedi: %s", e)
+    for ek in parcalar[1:]:
+        try:
+            await bot.send_message(chat_id, ek)
+        except Exception:
             pass
 
-    # 2. Aşama: Hızlı Hesap Radarından Çıktı mı?
-    temiz_mesaj = re.sub(pattern, '', mesaj).strip().lower()
-    sadece_hesap_mi = False
-    if match and (not temiz_mesaj or len(temiz_mesaj) < 3 or temiz_mesaj in ["kaç", "kaç tl", "ne kadar", "hesapla", "kaç dolar"]):
-        sadece_hesap_mi = True 
 
-    if sadece_hesap_mi and hesap_metni:
-        bot.reply_to(message, hesap_metni.strip(), parse_mode="HTML")
+# ----------------------------------------------------------------------------
+# HAFIZA — botun "amnezisi" burada bitiyor
+# ----------------------------------------------------------------------------
+
+@dataclass
+class Konusma:
+    mesajlar: deque = field(default_factory=lambda: deque(maxlen=HAFIZA_UZUNLUGU))
+    son_erisim: float = field(default_factory=time.time)
+
+
+class Hafiza:
+    def __init__(self):
+        self._depo: Dict[str, Konusma] = {}
+
+    @staticmethod
+    def _anahtar(chat_id: int, user_id: int) -> str:
+        # Grupta herkesin hafızası ayrı: sohbetler birbirine karışmaz
+        return f"{chat_id}:{user_id}"
+
+    def ekle(self, chat_id: int, user_id: int, rol: str, icerik: str) -> None:
+        k = self._anahtar(chat_id, user_id)
+        konusma = self._depo.setdefault(k, Konusma())
+        konusma.mesajlar.append({"role": rol, "content": icerik[:1500]})
+        konusma.son_erisim = time.time()
+
+    def getir(self, chat_id: int, user_id: int) -> List[Dict[str, str]]:
+        k = self._anahtar(chat_id, user_id)
+        konusma = self._depo.get(k)
+        if not konusma:
+            return []
+        if time.time() - konusma.son_erisim > HAFIZA_TTL:
+            self._depo.pop(k, None)
+            return []
+        return list(konusma.mesajlar)
+
+    def temizle(self, chat_id: int, user_id: int) -> None:
+        self._depo.pop(self._anahtar(chat_id, user_id), None)
+
+    def budama(self) -> None:
+        simdi = time.time()
+        olu = [k for k, v in self._depo.items() if simdi - v.son_erisim > HAFIZA_TTL]
+        for k in olu:
+            self._depo.pop(k, None)
+
+
+hafiza = Hafiza()
+
+
+# ----------------------------------------------------------------------------
+# PİYASA VERİSİ — fiyat, korku/açgözlülük, long/short, funding
+# ----------------------------------------------------------------------------
+
+async def binance_sembolleri() -> set:
+    """USDT paritesi olan gerçek coin listesi. Regex'in yanlış coin yakalamasını engeller."""
+    onbellek = sembol_cache.get("semboller")
+    if onbellek:
+        return onbellek
+    veri = await json_getir("https://api.binance.com/api/v3/exchangeInfo", timeout=15)
+    semboller = set()
+    if veri and "symbols" in veri:
+        for s in veri["symbols"]:
+            if s.get("quoteAsset") == "USDT" and s.get("status") == "TRADING":
+                semboller.add(s["baseAsset"].upper())
+    if not semboller:  # ağ çöktüyse en azından majörler
+        semboller = {"BTC", "ETH", "BNB", "SOL", "XRP", "TRX", "AVAX", "DOGE", "ADA", "PAXG"}
+    return sembol_cache.set("semboller", semboller)
+
+
+async def fiyat_getir(coin: str) -> Optional[Dict[str, float]]:
+    coin = coin.upper()
+    onbellek = fiyat_cache.get(coin)
+    if onbellek:
+        return onbellek
+    veri = await json_getir(
+        f"https://api.binance.com/api/v3/ticker/24hr?symbol={coin}USDT", timeout=4
+    )
+    if not veri or "lastPrice" not in veri:
+        return None
+    sonuc = {
+        "fiyat": float(veri["lastPrice"]),
+        "degisim": float(veri.get("priceChangePercent", 0)),
+        "hacim": float(veri.get("quoteVolume", 0)),
+    }
+    return fiyat_cache.set(coin, sonuc)
+
+
+async def usdt_try() -> float:
+    onbellek = fiyat_cache.get("__USDTTRY")
+    if onbellek:
+        return onbellek
+    veri = await json_getir("https://api.binance.com/api/v3/ticker/price?symbol=USDTTRY", timeout=4)
+    kur = float(veri["price"]) if veri and "price" in veri else 0.0
+    return fiyat_cache.set("__USDTTRY", kur) if kur else 0.0
+
+
+async def korku_acgozluluk() -> Optional[Dict[str, str]]:
+    onbellek = duygu_cache.get("fng")
+    if onbellek:
+        return onbellek
+    veri = await json_getir("https://api.alternative.me/fng/?limit=1", timeout=6)
+    try:
+        kayit = veri["data"][0]
+        tr = {
+            "Extreme Fear": "Aşırı Korku", "Fear": "Korku", "Neutral": "Nötr",
+            "Greed": "Açgözlülük", "Extreme Greed": "Aşırı Açgözlülük",
+        }
+        etiket = kayit.get("value_classification", "")
+        sonuc = {"deger": kayit["value"], "etiket": tr.get(etiket, etiket)}
+        return duygu_cache.set("fng", sonuc)
+    except Exception:
+        return None
+
+
+async def long_short(coin: str) -> Optional[Dict[str, float]]:
+    coin = coin.upper()
+    onbellek = oran_cache.get(f"ls:{coin}")
+    if onbellek:
+        return onbellek
+    veri = await json_getir(
+        "https://fapi.binance.com/futures/data/globalLongShortAccountRatio"
+        f"?symbol={coin}USDT&period=15m&limit=1", timeout=6
+    )
+    try:
+        kayit = veri[0]
+        sonuc = {
+            "oran": float(kayit["longShortRatio"]),
+            "long": float(kayit["longAccount"]) * 100,
+            "short": float(kayit["shortAccount"]) * 100,
+        }
+        return oran_cache.set(f"ls:{coin}", sonuc)
+    except Exception:
+        return None
+
+
+async def funding(coin: str) -> Optional[float]:
+    veri = await json_getir(
+        f"https://fapi.binance.com/fapi/v1/premiumIndex?symbol={coin.upper()}USDT", timeout=5
+    )
+    try:
+        return float(veri["lastFundingRate"]) * 100
+    except Exception:
+        return None
+
+
+async def piyasa_konteksti(mesaj: str) -> str:
+    """
+    Mesajda geçen coinlerin CANLI fiyatını + piyasa duygusunu toplar ve
+    modele 'sistem bilgisi' olarak enjekte edilecek metni üretir.
+    """
+    semboller = await binance_sembolleri()
+    adaylar = {k.upper() for k in re.findall(r"[A-Za-z]{2,10}", mesaj)}
+    bulunan = [c for c in adaylar if c in semboller][:4]
+    if not bulunan:
+        bulunan = ["BTC"]  # hiçbir coin geçmiyorsa en azından piyasanın nabzı
+
+    gorevler = [fiyat_getir(c) for c in bulunan] + [korku_acgozluluk(), long_short(bulunan[0])]
+    sonuclar = await asyncio.gather(*gorevler, return_exceptions=True)
+
+    fiyatlar = sonuclar[: len(bulunan)]
+    fng = sonuclar[len(bulunan)] if not isinstance(sonuclar[len(bulunan)], Exception) else None
+    ls = sonuclar[-1] if not isinstance(sonuclar[-1], Exception) else None
+
+    satirlar = []
+    for coin, veri in zip(bulunan, fiyatlar):
+        if isinstance(veri, dict):
+            satirlar.append(f"{coin}: ${veri['fiyat']:,.4f} (24s %{veri['degisim']:+.2f})")
+    if isinstance(fng, dict):
+        satirlar.append(f"Korku&Açgözlülük Endeksi: {fng['deger']}/100 ({fng['etiket']})")
+    if isinstance(ls, dict):
+        satirlar.append(
+            f"{bulunan[0]} Long/Short: {ls['oran']:.2f} "
+            f"(Long %{ls['long']:.0f} / Short %{ls['short']:.0f})"
+        )
+    if not satirlar:
+        return ""
+    return (
+        "[CANLI PİYASA VERİSİ — bu rakamlar gerçek ve şu andır. "
+        "Fiyat sorulursa SADECE bunları kullan, asla kendi kafandan rakam uydurma]\n"
+        + "\n".join(satirlar)
+    )
+
+
+# ----------------------------------------------------------------------------
+# YAPAY ZEKA AĞI — devre kesicili, asenkron, hafızalı
+# ----------------------------------------------------------------------------
+
+@dataclass
+class Motor:
+    isim: str
+    url: str
+    env: str
+    model: str
+    tip: str = "openai"
+
+
+MOTORLAR: List[Motor] = [
+    Motor("DEEPSEEK", "https://api.deepseek.com/chat/completions", "DEEPSEEK_API_KEY", "deepseek-chat"),
+    Motor("GROQ", "https://api.groq.com/openai/v1/chat/completions", "GROQ_API_KEY", "llama-3.3-70b-versatile"),
+    Motor("NVIDIA", "https://integrate.api.nvidia.com/v1/chat/completions", "NVIDIA_NIM_API_KEY", "meta/llama-3.1-70b-instruct"),
+    Motor("MISTRAL", "https://api.mistral.ai/v1/chat/completions", "MISTRAL_API_KEY", "mistral-small-latest"),
+    Motor("XAI", "https://api.x.ai/v1/chat/completions", "XAI_API_KEY", "grok-2-latest"),
+    Motor("GEMINI", "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent",
+          "GEMINI_API_KEY", "gemini-1.5-flash", tip="gemini"),
+]
+
+# Çöken motorun ne zamana kadar cezalı olduğu
+_ceza: Dict[str, float] = defaultdict(float)
+
+
+def _cezali_mi(isim: str) -> bool:
+    return time.time() < _ceza[isim]
+
+
+async def _motor_cagir(motor: Motor, mesajlar: List[Dict[str, str]], api_key: str) -> str:
+    s = await oturum()
+    zaman_asimi = aiohttp.ClientTimeout(total=MOTOR_TIMEOUT)
+
+    if motor.tip == "gemini":
+        sistem = "\n".join(m["content"] for m in mesajlar if m["role"] == "system")
+        icerik = [
+            {"role": "user" if m["role"] == "user" else "model", "parts": [{"text": m["content"]}]}
+            for m in mesajlar if m["role"] in ("user", "assistant")
+        ]
+        govde = {"contents": icerik, "systemInstruction": {"parts": [{"text": sistem}]}}
+        url = f"{motor.url}?key={api_key}"
+        async with s.post(url, json=govde, timeout=zaman_asimi) as r:
+            if r.status != 200:
+                raise RuntimeError(f"HTTP {r.status}")
+            veri = await r.json()
+            return veri["candidates"][0]["content"]["parts"][0]["text"]
+
+    govde = {
+        "model": motor.model,
+        "messages": mesajlar,
+        "temperature": 0.7,
+        "max_tokens": 700,
+    }
+    basliklar = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    async with s.post(motor.url, json=govde, headers=basliklar, timeout=zaman_asimi) as r:
+        if r.status != 200:
+            raise RuntimeError(f"HTTP {r.status}")
+        veri = await r.json()
+        return veri["choices"][0]["message"]["content"]
+
+
+async def ai_yanit_al(
+    mesaj: str,
+    chat_id: int = 0,
+    user_id: int = 0,
+    analiz_mi: bool = False,
+    kontekst: str = "",
+    hafiza_kullan: bool = True,
+) -> Tuple[str, str]:
+    if analiz_mi:
+        sistem = (
+            "Sen usta bir kripto analistisin. Verilen göstergeleri kullanarak SADECE 2 cümlelik, "
+            "kısa, net ve keskin bir strateji ver. Destan yazma, maddeleme yapma."
+        )
+    else:
+        sistem = (
+            "Sen Emre AI'sın; Telegram'daki bir kripto karargahının asistanısın. "
+            "Kısa, net, samimi konuş; gerekirse şaka yap ama uzatma. "
+            "Konuşma geçmişini dikkate al. Fiyat konusunda ASLA tahmin yürütme: "
+            "sana verilen canlı piyasa verisi dışında rakam telaffuz etme, veri yoksa 'anlık veriye bakayım' de."
+        )
+
+    mesajlar: List[Dict[str, str]] = [{"role": "system", "content": sistem}]
+    if kontekst:
+        mesajlar.append({"role": "system", "content": kontekst})
+    if hafiza_kullan:
+        mesajlar.extend(hafiza.getir(chat_id, user_id))
+    mesajlar.append({"role": "user", "content": mesaj})
+
+    hatalar = []
+    for motor in MOTORLAR:
+        api_key = os.environ.get(motor.env)
+        if not api_key or _cezali_mi(motor.isim):
+            continue
+        try:
+            ham = await _motor_cagir(motor, mesajlar, api_key)
+            if not ham or not ham.strip():
+                raise RuntimeError("bos yanit")
+            if hafiza_kullan:
+                hafiza.ekle(chat_id, user_id, "user", mesaj)
+                hafiza.ekle(chat_id, user_id, "assistant", ham.strip())
+            return motor.isim, html_temizle(ham)
+        except asyncio.TimeoutError:
+            _ceza[motor.isim] = time.time() + MOTOR_CEZA_SURESI
+            hatalar.append(f"{motor.isim}(timeout)")
+        except Exception as e:
+            _ceza[motor.isim] = time.time() + MOTOR_CEZA_SURESI
+            hatalar.append(f"{motor.isim}({e})")
+
+    log.error("Tum motorlar dustu: %s", " | ".join(hatalar))
+    return "HATA", "Zeka motorlarının hepsi şu an meşgul. Birkaç saniye sonra tekrar dene."
+
+
+# ----------------------------------------------------------------------------
+# FLOOD KORUMASI
+# ----------------------------------------------------------------------------
+
+_son_istek: Dict[int, float] = defaultdict(float)
+
+
+def cok_hizli_mi(user_id: int) -> bool:
+    simdi = time.time()
+    if simdi - _son_istek[user_id] < KULLANICI_BEKLEME:
+        return True
+    _son_istek[user_id] = simdi
+    return False
+
+
+# ----------------------------------------------------------------------------
+# KOMUTLAR
+# ----------------------------------------------------------------------------
+
+@bot.message_handler(commands=["start", "yardim", "help"])
+async def ana_menu(message):
+    metin = (
+        "<b>👑 EMRE AI — KARARGAH V15</b>\n\n"
+        "<b>/analiz</b> BTC 4s — TradingView canlı sinyal + AI strateji\n"
+        "<b>/piyasa</b> — En çok yükselen/düşen 5 coin\n"
+        "<b>/duygu</b> — Korku &amp; Açgözlülük + Long/Short\n"
+        "<b>/unut</b> — Botun seninle olan sohbet hafızasını siler\n\n"
+        "<i>Sohbet için mesajında \"emrai\" veya \"karargah\" de. "
+        "\"0.5 BNB kaç TL\" gibi yazarsan hesabı AI'ı hiç yormadan anında yaparım.</i>"
+    )
+    await bot.reply_to(message, metin)
+
+
+@bot.message_handler(commands=["unut"])
+async def unut(message):
+    hafiza.temizle(message.chat.id, message.from_user.id)
+    await bot.reply_to(message, "🧹 Tamam, aramızda konuşulanları unuttum. Sıfırdan başlıyoruz.")
+
+
+@bot.message_handler(commands=["duygu", "korku"])
+async def duygu_komutu(message):
+    fng, ls, btc = await asyncio.gather(
+        korku_acgozluluk(), long_short("BTC"), fiyat_getir("BTC")
+    )
+    satir = ["<b>🌡️ PİYASA NABZI</b>\n"]
+    if isinstance(btc, dict):
+        satir.append(f"₿ <b>BTC:</b> <code>${btc['fiyat']:,.0f}</code> (24s %{btc['degisim']:+.2f})")
+    if isinstance(fng, dict):
+        bar_dolu = int(int(fng["deger"]) / 10)
+        bar = "█" * bar_dolu + "░" * (10 - bar_dolu)
+        satir.append(f"😨 <b>Korku/Açgözlülük:</b> <code>{fng['deger']}/100</code> — {fng['etiket']}\n<code>{bar}</code>")
+    if isinstance(ls, dict):
+        satir.append(
+            f"⚔️ <b>BTC Long/Short:</b> <code>{ls['oran']:.2f}</code>\n"
+            f"🟢 Long %{ls['long']:.0f} | 🔴 Short %{ls['short']:.0f}"
+        )
+    fr = await funding("BTC")
+    if fr is not None:
+        satir.append(f"💸 <b>Funding:</b> <code>%{fr:.4f}</code>")
+    if len(satir) == 1:
+        satir.append("Veri kaynaklarına şu an ulaşılamıyor.")
+    await bot.reply_to(message, "\n".join(satir))
+
+
+@bot.message_handler(commands=["piyasa"])
+async def piyasa_durumu(message):
+    veri = await json_getir("https://api.binance.com/api/v3/ticker/24hr", timeout=15)
+    if not veri:
+        await bot.reply_to(message, "❌ Piyasa verisine şu an ulaşılamıyor.")
+        return
+    usdt = [
+        d for d in veri
+        if d["symbol"].endswith("USDT") and float(d.get("quoteVolume", 0)) > 20_000_000
+        and not re.search(r"(UP|DOWN|BULL|BEAR)USDT$", d["symbol"])
+    ]
+    usdt.sort(key=lambda d: float(d["priceChangePercent"]), reverse=True)
+    yukselen, dusen = usdt[:5], usdt[-5:][::-1]
+
+    def satirla(liste):
+        return "\n".join(
+            f"<code>{d['symbol'].replace('USDT',''):<6}</code> "
+            f"${float(d['lastPrice']):,.4f}  <b>%{float(d['priceChangePercent']):+.2f}</b>"
+            for d in liste
+        )
+
+    metin = (
+        "<b>📊 24 SAATLİK PİYASA</b>\n\n"
+        f"🚀 <b>EN ÇOK YÜKSELEN</b>\n{satirla(yukselen)}\n\n"
+        f"🩸 <b>EN ÇOK DÜŞEN</b>\n{satirla(dusen)}\n\n"
+        "<i>Yalnızca hacmi 20M$ üzeri pariteler listelenir.</i>"
+    )
+    await bot.reply_to(message, metin)
+
+
+ZAMAN_HARITASI = {
+    "15m": (Interval.INTERVAL_15_MINUTES, "15 Dakikalık"),
+    "15dk": (Interval.INTERVAL_15_MINUTES, "15 Dakikalık"),
+    "1h": (Interval.INTERVAL_1_HOUR, "1 Saatlik"),
+    "1s": (Interval.INTERVAL_1_HOUR, "1 Saatlik"),
+    "4h": (Interval.INTERVAL_4_HOURS, "4 Saatlik"),
+    "4s": (Interval.INTERVAL_4_HOURS, "4 Saatlik"),
+    "1d": (Interval.INTERVAL_1_DAY, "Günlük"),
+    "1g": (Interval.INTERVAL_1_DAY, "Günlük"),
+    "1w": (Interval.INTERVAL_1_WEEK, "Haftalık"),
+    "1hft": (Interval.INTERVAL_1_WEEK, "Haftalık"),
+}
+
+
+def _tv_cek(coin: str, periyot) -> Dict[str, Any]:
+    """Bloklayan tradingview_ta çağrısı — ayrı thread'de çalıştırılır."""
+    handler = TA_Handler(
+        symbol=f"{coin}USDT", screener="crypto", exchange="BINANCE", interval=periyot
+    )
+    analiz = handler.get_analysis()
+    g = analiz.indicators
+    return {
+        "tavsiye": analiz.summary.get("RECOMMENDATION", "BİLİNMİYOR"),
+        "al": analiz.summary.get("BUY", 0),
+        "sat": analiz.summary.get("SELL", 0),
+        "notr": analiz.summary.get("NEUTRAL", 0),
+        "ADX": g.get("ADX", 0), "RSI": g.get("RSI", 0), "MACD": g.get("MACD.macd", 0),
+        "Stoch": g.get("Stoch.K", 0), "CCI": g.get("CCI20", 0), "Mom": g.get("Mom", 0),
+        "EMA20": g.get("EMA20", 0), "SMA50": g.get("SMA50", 0), "SMA200": g.get("SMA200", 0),
+        "kapanis": g.get("close", 0),
+    }
+
+
+@bot.message_handler(commands=["analiz"])
+async def tv_analiz(message):
+    komut = message.text.split()
+    if len(komut) < 2:
+        await bot.reply_to(message, "Kral hangi coini inceleyeyim? Örnek: <code>/analiz BTC 4s</code>")
         return
 
-    # 3. Aşama: KARİZMATİK VE EŞSİZ ÇAĞRI (Sadece özel marka isimlerini duyunca konuşur)
-    # Günlük sohbette yanlışlıkla kullanılmayacak, sana özel tetikleyiciler:
-    tetikleyiciler = ["emrai", "emray", "emreai", "karargah", "asistan"]
+    coin = re.sub(r"(USDT|USD|TRY)$", "", komut[1].upper())
+    periyot, periyot_adi = Interval.INTERVAL_1_DAY, "Günlük"
+    if len(komut) > 2 and komut[2].lower() in ZAMAN_HARITASI:
+        periyot, periyot_adi = ZAMAN_HARITASI[komut[2].lower()]
+
+    bekleme = await bot.reply_to(
+        message, f"📡 <b>{coin} ({periyot_adi})</b> verileri çekiliyor..."
+    )
+
+    try:
+        # TradingView + piyasa duygusu AYNI ANDA çekilir
+        tv, fng, ls, fr = await asyncio.gather(
+            asyncio.to_thread(_tv_cek, coin, periyot),
+            korku_acgozluluk(),
+            long_short(coin),
+            funding(coin),
+            return_exceptions=True,
+        )
+        if isinstance(tv, Exception):
+            raise tv
+    except Exception as e:
+        await guvenli_duzenle(
+            message.chat.id, bekleme.message_id,
+            f"❌ <b>{coin}USDT</b> Binance'de bulunamadı veya veri çekilemedi.\n<i>{html.escape(str(e)[:150])}</i>",
+        )
+        return
+
+    r = lambda x: round(float(x or 0), 2)
+
+    ozet = (
+        f"Periyot: {periyot_adi}, Fiyat: {tv['kapanis']}, Sinyal: {tv['tavsiye']} "
+        f"(Al:{tv['al']} Sat:{tv['sat']} Nötr:{tv['notr']}), ADX: {r(tv['ADX'])}, RSI: {r(tv['RSI'])}, "
+        f"Stoch: {r(tv['Stoch'])}, MACD: {r(tv['MACD'])}, CCI: {r(tv['CCI'])}, Mom: {r(tv['Mom'])}, "
+        f"EMA20: {r(tv['EMA20'])}, SMA50: {r(tv['SMA50'])}, SMA200: {r(tv['SMA200'])}"
+    )
+    if isinstance(fng, dict):
+        ozet += f", Piyasa Duygusu: {fng['deger']}/100 {fng['etiket']}"
+    if isinstance(ls, dict):
+        ozet += f", Long/Short: {ls['oran']:.2f}"
+    if isinstance(fr, float):
+        ozet += f", Funding: %{fr:.4f}"
+
+    await guvenli_duzenle(
+        message.chat.id, bekleme.message_id,
+        f"🧠 Veri geldi, {periyot_adi} grafik yorumlanıyor..."
+    )
+
+    motor_adi, yorum = await ai_yanit_al(ozet, analiz_mi=True, hafiza_kullan=False)
+
+    sonuc = (
+        f"📊 <b>PRO ANALİZ: {coin}</b> ⏳ <b>({periyot_adi})</b>\n"
+        f"💵 <b>Fiyat:</b> <code>{tv['kapanis']}</code>\n"
+        f"📈 <b>Genel Sinyal:</b> <code>{tv['tavsiye']}</code> "
+        f"(🟢{tv['al']} / 🔴{tv['sat']} / ⚪{tv['notr']})\n"
+        f"🌊 <b>Trend Gücü (ADX):</b> <code>{r(tv['ADX'])}</code>\n"
+        f"⚡ <b>RSI:</b> <code>{r(tv['RSI'])}</code> | <b>Stoch:</b> <code>{r(tv['Stoch'])}</code>\n"
+        f"🌀 <b>MACD:</b> <code>{r(tv['MACD'])}</code> | <b>CCI:</b> <code>{r(tv['CCI'])}</code>\n"
+        f"🚀 <b>Momentum:</b> <code>{r(tv['Mom'])}</code>\n"
+        f"🎯 <b>EMA20:</b> <code>{r(tv['EMA20'])}</code>\n"
+        f"🛡️ <b>SMA50:</b> <code>{r(tv['SMA50'])}</code> | <b>SMA200:</b> <code>{r(tv['SMA200'])}</code>\n"
+    )
+    if isinstance(fng, dict):
+        sonuc += f"😨 <b>Piyasa Duygusu:</b> <code>{fng['deger']}/100</code> ({fng['etiket']})\n"
+    if isinstance(ls, dict):
+        sonuc += f"⚔️ <b>Long/Short:</b> <code>{ls['oran']:.2f}</code> (🟢%{ls['long']:.0f} / 🔴%{ls['short']:.0f})\n"
+    if isinstance(fr, float):
+        sonuc += f"💸 <b>Funding:</b> <code>%{fr:.4f}</code>\n"
+
+    sonuc += (
+        f"\n🤖 <b>EMRE AI YORUMU</b>\n"
+        f"<blockquote>⚡ [{motor_adi}]\n\n{yorum}</blockquote>\n"
+        f"<i>⚠️ YTD (Yatırım Tavsiyesi Değildir)</i>"
+    )
+    await guvenli_duzenle(message.chat.id, bekleme.message_id, sonuc)
+
+
+# ----------------------------------------------------------------------------
+# SERBEST SOHBET + HIZLI HESAP
+# ----------------------------------------------------------------------------
+
+MIKTAR_DESENI = re.compile(
+    r"(?i)\b(\d+(?:[.,]\d+)?)\s*(?:adet|tane)?\s*([A-Za-z]{2,10})\b"
+)
+
+
+async def hizli_hesap(mesaj: str) -> Tuple[str, bool]:
+    """Mesajda 'miktar + coin' varsa AI'ı hiç uyandırmadan hesaplar."""
+    eslesme = MIKTAR_DESENI.search(mesaj)
+    if not eslesme:
+        return "", False
+
+    miktar = float(eslesme.group(1).replace(",", "."))
+    ham = eslesme.group(2).upper()
+    takma = {"ALTIN": "PAXG", "GOLD": "PAXG", "GUMUS": "PAXG", "BITCOIN": "BTC", "ETHER": "ETH"}
+    coin = takma.get(ham, ham)
+
+    semboller = await binance_sembolleri()
+    if coin not in semboller:
+        return "", False
+
+    veri, kur = await asyncio.gather(fiyat_getir(coin), usdt_try())
+    if not veri:
+        return "", False
+
+    toplam_usd = miktar * veri["fiyat"]
+    metin = (
+        f"🧮 <b>HIZLI HESAP ({miktar:g} {coin})</b>\n"
+        f"💵 <b>${toplam_usd:,.2f}</b>\n"
+    )
+    if kur:
+        metin += f"🇹🇷 <b>₺{toplam_usd * kur:,.2f}</b>\n"
+    metin += f"<i>Birim: ${veri['fiyat']:,.4f} • 24s %{veri['degisim']:+.2f}</i>"
+
+    kalan = MIKTAR_DESENI.sub("", mesaj).strip().lower()
+    kalan = re.sub(r"[^\wçşğüöı ]", "", kalan)
+    sadece_hesap = len(kalan) < 12 or kalan in {
+        "kaç", "kac", "kaç tl", "kac tl", "ne kadar", "hesapla", "kaç dolar", "kac dolar", "eder"
+    }
+    return metin, sadece_hesap
+
+
+@bot.message_handler(func=lambda m: bool(m.text))
+async def serbest_sohbet(message):
+    mesaj = message.text
+
+    # 1) Hızlı hesap radarı — token harcamaz
+    hesap_metni, sadece_hesap = await hizli_hesap(mesaj)
+    if hesap_metni and sadece_hesap:
+        await bot.reply_to(message, hesap_metni)
+        return
+
+    # 2) Karizmatik çağrı — adı anılmadıysa ve cevap verilmiyorsa sus
     mesaj_kucuk = mesaj.lower()
-    
-    # Kelimeleri tam kelime olarak aramak için (örneğin "karargahta" derse tetiklenmez, tam "karargah" demesi lazım)
-    tetiklendi_mi = any(re.search(fr'\b{kelime}\b', mesaj_kucuk) for kelime in tetikleyiciler)
-    
-    # Eğer cümlede bu özel isimler geçmiyorsa ve hızlı hesap yapılmadıysa mesajı görmezden gel (Token israfını engeller!)
-    if not tetiklendi_mi:
+    cagrildi = any(re.search(rf"\b{k}\b", mesaj_kucuk) for k in TETIKLEYICILER)
+    yanit_mi = bool(
+        message.reply_to_message
+        and message.reply_to_message.from_user
+        and message.reply_to_message.from_user.is_bot
+    )
+    ozel_mi = message.chat.type == "private"
+    if not (cagrildi or yanit_mi or ozel_mi):
         return
 
-    # 4. Aşama: Adı seslenildiyse normal sohbete gir
-    mesaj_giden = bot.reply_to(message, "🧠 Karargah Düşünüyor...")
-    motor_adi, yanit = ai_yanit_al(mesaj, analiz_mi=False)
-    
+    if cok_hizli_mi(message.from_user.id):
+        return
+
+    bekleme = await bot.reply_to(message, "🧠 Karargah düşünüyor...")
+
+    # 3) CONTEXT INJECTION — modele canlı fiyatı sızdır, halüsinasyonu öldür
+    kontekst = await piyasa_konteksti(mesaj)
+
+    motor_adi, yanit = await ai_yanit_al(
+        mesaj,
+        chat_id=message.chat.id,
+        user_id=message.from_user.id,
+        kontekst=kontekst,
+    )
+
     sonuc = f"<blockquote>{yanit}</blockquote>\n<i>⚡ {motor_adi}</i>"
     if hesap_metni:
-        sonuc += hesap_metni
-    
-    try:
-        bot.edit_message_text(sonuc, chat_id=message.chat.id, message_id=mesaj_giden.message_id, parse_mode="HTML")
-    except Exception:
-        bot.edit_message_text(yanit, chat_id=message.chat.id, message_id=mesaj_giden.message_id)
+        sonuc += f"\n\n{hesap_metni}"
+    await guvenli_duzenle(message.chat.id, bekleme.message_id, sonuc)
 
-print("Emre AI V14 Karargah Tüm Özellikleriyle Geri Döndü!")
-bot.infinity_polling(timeout=20, long_polling_timeout=10)
+
+# ----------------------------------------------------------------------------
+# ARKA PLAN GÖREVİ + BAŞLATICI
+# ----------------------------------------------------------------------------
+
+async def bakimci():
+    """Hafızayı periyodik temizler, sembol listesini sıcak tutar."""
+    while True:
+        try:
+            hafiza.budama()
+            await binance_sembolleri()
+        except Exception as e:
+            log.debug("Bakim hatasi: %s", e)
+        await asyncio.sleep(600)
+
+
+async def main():
+    await binance_sembolleri()
+    asyncio.create_task(bakimci())
+    aktif = [m.isim for m in MOTORLAR if os.environ.get(m.env)]
+    log.info("Emre AI V15 ayakta. Aktif motorlar: %s", ", ".join(aktif) or "YOK")
+    try:
+        await bot.infinity_polling(timeout=30, request_timeout=60)
+    finally:
+        if _session and not _session.closed:
+            await _session.close()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
