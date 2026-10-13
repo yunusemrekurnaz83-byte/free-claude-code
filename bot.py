@@ -1,17 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-EMRE AI — V15 "ASENKRON KARARGAH + MENÜLÜ"
+EMRE AI — V16 "VIP KARARGAH SİSTEMİ"
 =================================
-V14'e göre değişenler:
-  1. Tamamen ASENKRON  -> aiohttp + AsyncTeleBot.
-  2. HAFIZA            -> Her sohbet için son N mesaj tutuluyor.
-  3. CONTEXT INJECTION -> Modele anlık fiyat sızdırılır.
-  4. PİYASA HİSSİ      -> Fear & Greed Index, Long/Short oranı.
-  5. DEVRE KESİCİ      -> Çöken motor 90 sn cezalı.
-  6. GERÇEK SEMBOL     -> Binance exchangeInfo ile doğrulama.
-  7. RATE LIMIT        -> Kullanıcı başına flood koruması.
-  8. TradingView       -> Ayrı thread'de çalışır.
-  9. MENÜ ENTEGRASYONU -> Telegram / menüsü otomatik yüklenir.
+1. VIP Sistem Entegrasyonu (Standart, Beklemede, VIP)
+2. Çelik Kalkan (VIP olmayanlar analiz/sohbet yapamaz)
+3. UID Kayıt ve Admin Onay Mekanizması
+4. Inline Pencereler (Balina, Alarm, Analiz, Haber yönlendirmeleri)
 """
 
 import asyncio
@@ -26,7 +20,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import aiohttp
 from telebot.async_telebot import AsyncTeleBot
-from telebot.types import BotCommand
+from telebot.types import BotCommand, InlineKeyboardMarkup, InlineKeyboardButton
 from tradingview_ta import TA_Handler, Interval
 
 # ----------------------------------------------------------------------------
@@ -45,14 +39,23 @@ logging.basicConfig(
 )
 log = logging.getLogger("emre-ai")
 
-HAFIZA_UZUNLUGU = 8          
+HAFIZA_UZUNLUGU = 8         
 HAFIZA_TTL = 30 * 60         
 MOTOR_TIMEOUT = 12           
 MOTOR_CEZA_SURESI = 90       
 KULLANICI_BEKLEME = 4        
 TETIKLEYICILER = ["emrai", "emray", "emreai", "karargah", "asistan"]
-
 TELEGRAM_LIMIT = 3900        
+
+# ----------------------------------------------------------------------------
+# VIP SİSTEMİ & VERİTABANI
+# ----------------------------------------------------------------------------
+# Kendi ID'ni buraya yazmalısın. Eğer env'den çekemezse varsayılanı kullanır.
+ADMIN_ID = os.environ.get("EMRE_ADMIN_ID", "6747735733") 
+
+# Geçici RAM veritabanı (İleride SQL'e taşınabilir)
+KULLANICILAR = {} # user_id -> {"durum": "STANDART", "uid": ""} 
+BEKLENEN_ISLEM = {} # user_id -> "UID_BEKLIYOR"
 
 # ----------------------------------------------------------------------------
 # ORTAK HTTP OTURUMU
@@ -66,7 +69,7 @@ async def oturum() -> aiohttp.ClientSession:
         _session = aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=20),
             connector=aiohttp.TCPConnector(limit=60, ttl_dns_cache=300),
-            headers={"User-Agent": "EmreAI/15.0"},
+            headers={"User-Agent": "EmreAI/16.0"},
         )
     return _session
 
@@ -424,10 +427,6 @@ async def ai_yanit_al(
     log.error("Tum motorlar dustu: %s", " | ".join(hatalar))
     return "HATA", "Zeka motorlarının hepsi şu an meşgul. Birkaç saniye sonra tekrar dene."
 
-# ----------------------------------------------------------------------------
-# FLOOD KORUMASI
-# ----------------------------------------------------------------------------
-
 _son_istek: Dict[int, float] = defaultdict(float)
 
 def cok_hizli_mi(user_id: int) -> bool:
@@ -438,21 +437,153 @@ def cok_hizli_mi(user_id: int) -> bool:
     return False
 
 # ----------------------------------------------------------------------------
-# KOMUTLAR
+# KOMUTLAR VE VIP SİSTEMİ (KALKAN)
 # ----------------------------------------------------------------------------
 
 @bot.message_handler(commands=["start", "yardim", "help"])
 async def ana_menu(message):
-    metin = (
-        "<b>👑 EMRE AI — KARARGAH V15</b>\n\n"
-        "<b>/analiz</b> BTC 4s — TradingView canlı sinyal + AI strateji\n"
-        "<b>/piyasa</b> — En çok yükselen/düşen 5 coin\n"
-        "<b>/duygu</b> — Korku &amp; Açgözlülük + Long/Short\n"
-        "<b>/unut</b> — Botun seninle olan sohbet hafızasını siler\n\n"
-        "<i>Sohbet için mesajında \"emrai\" veya \"karargah\" de. "
-        "\"0.5 BNB kaç TL\" gibi yazarsan hesabı AI'ı hiç yormadan anında yaparım.</i>"
+    user_id = message.from_user.id
+    # Kullanıcının durumunu veritabanından (şimdilik RAM) kontrol et
+    durum = KULLANICILAR.get(user_id, {}).get("durum", "STANDART")
+
+    if durum == "VIP" or str(user_id) == str(ADMIN_ID):
+        # VIP ANA KARARGAH MENÜSÜ (KİLİTLER AÇIK)
+        markup = InlineKeyboardMarkup(row_width=2)
+        markup.add(
+            InlineKeyboardButton("🧠 AI Analiz Motoru", callback_data="menu_analiz"),
+            InlineKeyboardButton("🐋 Canlı Balina Radarı", callback_data="menu_balina"),
+            InlineKeyboardButton("🚨 Kritik Alarmlar", callback_data="menu_alarm"),
+            InlineKeyboardButton("📰 Global İstihbarat", callback_data="menu_haber"),
+            InlineKeyboardButton("👤 VIP Hesabım", callback_data="menu_hesap")
+        )
+        metin = (
+            "👑 <b>WhoEmreBtc Karargahına Hoş Geldin VIP!</b>\n\n"
+            "Tüm sistem kilitleri açık. Aşağıdaki pencerelerden ağımızın farklı kollarına ulaşabilir veya doğrudan /analiz komutuyla AI motorunu tetikleyebilirsin.\n\n"
+            "<i>(Ayrıca sohbette 'emrai' diyerek benimle konuşabilir, hızlı hesaplamalar yaptırabilirsin)</i>"
+        )
+        await bot.reply_to(message, metin, reply_markup=markup)
+
+    elif durum == "BEKLEMEDE":
+        uid_no = KULLANICILAR[user_id].get("uid", "")
+        await bot.reply_to(message, f"⏳ <b>Talebiniz Alındı!</b>\nUID numaranız (<code>{uid_no}</code>) otonom sistemlerimiz ve yöneticilerimiz tarafından doğrulanıyor. Onaylandığında bildirim alacaksınız.")
+
+    else:
+        # VİTRİN MANİFESTOSU (KAYIT EKRANI / KİLİTLİ)
+        metin = (
+            "🚀 <b>Hoş Geldin! Ben WhoEmreBtc Karargahının 4 Katmanlı Yapay Zeka Asistanıyım.</b>\n\n"
+            "Manuel analizlerin ve duyguya dayalı işlemlerin bittiği yere geldin. Burada saniye altı balina transferleri, "
+            "on-chain likidasyon haritaları ve 11 katmanlı AI sinyalleri konuşur.\n\n"
+            "💎 Bu üst düzey istihbarat altyapısı, partner borsamız üzerinden ekibimize katılanlara <b>1 YIL BOYUNCA ÜCRETSİZ</b> sunulmaktadır.\n\n"
+            "Sistemin kilitlerini açmak ve Karargah'a giriş yapmak için aşağıdaki butona tıkla!"
+        )
+        markup = InlineKeyboardMarkup()
+        markup.add(InlineKeyboardButton("🔑 VIP Kilidini Aç (Ücretsiz)", callback_data="vip_baslat"))
+        await bot.reply_to(message, metin, reply_markup=markup)
+
+
+@bot.callback_query_handler(func=lambda call: True)
+async def callback_isle(call):
+    user_id = call.from_user.id
+    veri = call.data
+
+    if veri == "vip_baslat":
+        # Kullanıcıyı UID bekleme moduna alıyoruz
+        BEKLENEN_ISLEM[user_id] = "UID_BEKLIYOR"
+        metin = (
+            "🔗 <b>Harika! Şimdi Karargaha Katılıyoruz.</b>\n\n"
+            "Lütfen partner borsamızdan (Toobit vb.) açtığınız hesabın <b>UID numarasını</b> bu sohbete normal mesaj olarak yazın.\n\n"
+            "<i>(Sadece rakamlardan oluşan UID'nizi yazıp gönderin)</i>"
+        )
+        await bot.send_message(call.message.chat.id, metin)
+        await bot.answer_callback_query(call.id)
+    
+    # VIP Menü Tıklamaları
+    elif veri == "menu_analiz":
+        await bot.send_message(call.message.chat.id, "🧠 <b>AI Analiz:</b> Grafiğini incelemek istediğin coini şu formatta yazarak beni tetikleyebilirsin:\n<code>/analiz BTC 4s</code>")
+        await bot.answer_callback_query(call.id)
+        
+    elif veri == "menu_balina":
+        await bot.send_message(call.message.chat.id, "🐋 <b>Balina Radarı:</b> Dev on-chain transferler anlık olarak <b>t.me/emrebalinaagi</b> kanalımıza düşmektedir. (Çok yakında bu pencerede canlı akacaktır!)")
+        await bot.answer_callback_query(call.id)
+
+    elif veri == "menu_alarm":
+        await bot.send_message(call.message.chat.id, "🚨 <b>Kritik Alarmlar:</b> Pump/Dump radarı <b>t.me/emrealarmagi</b> üzerinden 7/24 aktiftir.")
+        await bot.answer_callback_query(call.id)
+        
+    elif veri == "menu_haber":
+        await bot.send_message(call.message.chat.id, "📰 <b>İstihbarat:</b> Global makro veriler <b>t.me/whoemrenew</b> ağımızdadır.")
+        await bot.answer_callback_query(call.id)
+        
+    elif veri == "menu_hesap":
+        uid = KULLANICILAR.get(user_id, {}).get("uid", "Bulunamadı")
+        await bot.send_message(call.message.chat.id, f"👤 <b>VIP HESABINIZ</b>\nTelegram ID: <code>{user_id}</code>\nBorsa UID: <code>{uid}</code>\nDurum: ✅ AKTİF\nKalan Süre: 365 Gün")
+        await bot.answer_callback_query(call.id)
+
+
+@bot.message_handler(func=lambda m: BEKLENEN_ISLEM.get(m.from_user.id) == "UID_BEKLIYOR")
+async def uid_kaydet(message):
+    user_id = message.from_user.id
+    uid_metin = message.text.strip()
+    
+    # Basit doğrulama (sadece rakam olmasını bekliyoruz)
+    if not uid_metin.isdigit():
+        await bot.reply_to(message, "❌ Geçersiz format. Lütfen sadece rakamlardan oluşan borsa UID'nizi yazın.")
+        return
+
+    # Kullanıcı durumunu beklemede olarak güncelle
+    KULLANICILAR[user_id] = {"durum": "BEKLEMEDE", "uid": uid_metin}
+    BEKLENEN_ISLEM.pop(user_id, None) # İşlem listesinden çıkar
+    
+    await bot.reply_to(
+        message, 
+        f"✅ <b>UID ({uid_metin}) Sisteme Kaydedildi!</b>\n\nEkibimiz UID kontrolünü yaptıktan sonra VIP kilitleriniz otomatik açılacaktır."
     )
-    await bot.reply_to(message, metin)
+    
+    # Admin Karargahına Bildirim Çak!
+    if ADMIN_ID and ADMIN_ID != "BURAYA_KENDI_TELEGRAM_ID_NUMARANI_YAZ":
+        try:
+            kullanici_adi = f"@{message.from_user.username}" if message.from_user.username else message.from_user.first_name
+            onay_metni = (
+                f"🔔 <b>YENİ VIP ONAY TALEBİ!</b>\n\n"
+                f"👤 Kullanıcı: {kullanici_adi}\n"
+                f"🆔 Telegram ID: <code>{user_id}</code>\n"
+                f"🔑 Borsa UID: <code>{uid_metin}</code>\n\n"
+                f"Onaylamak için aşağıdaki komutu kopyalayıp bota yapıştırın:\n"
+                f"<code>/onayla {user_id}</code>"
+            )
+            await bot.send_message(ADMIN_ID, onay_metni)
+        except Exception as e:
+            log.warning(f"Admine bildirim atılamadı: {e}")
+
+@bot.message_handler(commands=["onayla"])
+async def vip_onayla(message):
+    # Sadece Kurucu/Admin bu komutu kullanabilir
+    if str(message.from_user.id) != str(ADMIN_ID):
+        return
+        
+    komut_parcalari = message.text.split()
+    if len(komut_parcalari) < 2:
+        await bot.reply_to(message, "❌ Hatalı kullanım. Örnek: /onayla 123456789")
+        return
+        
+    hedef_id = int(komut_parcalari[1])
+    
+    if hedef_id in KULLANICILAR:
+        uid = KULLANICILAR[hedef_id].get("uid", "Bilinmiyor")
+        KULLANICILAR[hedef_id] = {"durum": "VIP", "uid": uid} # Artık tam yetkili VIP
+        await bot.reply_to(message, f"✅ Başarılı! {hedef_id} ID'li kullanıcı VIP yapıldı ve kilitleri açıldı.")
+        
+        # Kullanıcıya müjdeyi yolla
+        try:
+            await bot.send_message(
+                hedef_id, 
+                "🎉 <b>TEBRİKLER! VIP ERİŞİMİNİZ ONAYLANDI!</b>\n\nSistemin tüm kilitleri açıldı, Karargaha resmi olarak kabul edildiniz. Menüyü görmek için <b>/start</b> komutuna tıklayın."
+            )
+        except Exception as e:
+            log.warning(f"Kullanıcıya müjde atılamadı: {e}")
+    else:
+        await bot.reply_to(message, "❌ Bu ID'ye ait beklemede olan bir kayıt bulunamadı.")
+
 
 @bot.message_handler(commands=["unut"])
 async def unut(message):
@@ -544,6 +675,12 @@ def _tv_cek(coin: str, periyot) -> Dict[str, Any]:
 
 @bot.message_handler(commands=["analiz"])
 async def tv_analiz(message):
+    # ÇELİK KALKAN: VIP Olmayan Analiz Çekemez
+    durum = KULLANICILAR.get(message.from_user.id, {}).get("durum", "STANDART")
+    if durum != "VIP" and str(message.from_user.id) != str(ADMIN_ID):
+        await bot.reply_to(message, "🔒 <b>Erişim Engellendi: Bu özellik sadece VIP Karargah üyelerine özeldir.</b>\n\nKilidi ücretsiz açmak için /start komutunu kullanıp borsa UID'nizi sisteme tanımlayın.")
+        return
+
     komut = message.text.split()
     if len(komut) < 2:
         await bot.reply_to(message, "Kral hangi coini inceleyeyim? Örnek: <code>/analiz BTC 4s</code>")
@@ -667,6 +804,10 @@ async def hizli_hesap(mesaj: str) -> Tuple[str, bool]:
 
 @bot.message_handler(func=lambda m: bool(m.text))
 async def serbest_sohbet(message):
+    # EĞER KULLANICI UID GİRME AŞAMASINDAYSA (BOTUID BEKLİYORSA) BURAYA GİRMESİN
+    if BEKLENEN_ISLEM.get(message.from_user.id) == "UID_BEKLIYOR":
+        return
+
     mesaj = message.text
 
     hesap_metni, sadece_hesap = await hizli_hesap(mesaj)
@@ -686,6 +827,12 @@ async def serbest_sohbet(message):
         return
 
     if cok_hizli_mi(message.from_user.id):
+        return
+
+    # SOHBET İÇİN VIP KALKANI
+    durum = KULLANICILAR.get(message.from_user.id, {}).get("durum", "STANDART")
+    if durum != "VIP" and str(message.from_user.id) != str(ADMIN_ID):
+        await bot.reply_to(message, "🔒 <b>Karargah AI Asistanı sadece VIP üyelerle konuşur.</b>\nLütfen /start yazarak sistem kilitlerini açın.")
         return
 
     bekleme = await bot.reply_to(message, "🧠 Karargah düşünüyor...")
@@ -720,14 +867,14 @@ async def main():
     await binance_sembolleri()
     asyncio.create_task(bakimci())
     
-    # --- MENÜYÜ BURAYA EKLİYORUZ ---
+    # --- MENÜ KURULUMU ---
     try:
         komutlar = [
-            BotCommand("start", "👑 Ana menü ve komut listesi"),
-            BotCommand("analiz", "📊 Canlı TradingView sinyali (örn: /analiz BTC 1s)"),
-            BotCommand("piyasa", "🚀 En çok yükselen ve düşen coinler"),
-            BotCommand("duygu", "😨 Korku/Açgözlülük ve Long/Short oranı"),
-            BotCommand("unut", "🧹 Sohbet hafızasını temizler")
+            BotCommand("start", "👑 VIP Karargah Kilidini Aç & Ana Menü"),
+            BotCommand("analiz", "📊 Canlı AI TradingView Analizi (VIP)"),
+            BotCommand("piyasa", "🚀 Piyasada En Çok Yükselen / Düşenler"),
+            BotCommand("duygu", "😨 Korku/Açgözlülük ve Long/Short Oranı"),
+            BotCommand("unut", "🧹 AI Asistanın seninle olan hafızasını siler")
         ]
         await bot.set_my_commands(komutlar)
         log.info("Telegram komut menüsü basariyla ayarlandi.")
@@ -736,7 +883,7 @@ async def main():
     # -------------------------------
 
     aktif = [m.isim for m in MOTORLAR if os.environ.get(m.env)]
-    log.info("Emre AI V15 ayakta. Aktif motorlar: %s", ", ".join(aktif) or "YOK")
+    log.info("Emre AI V16 VIP SİSTEM ayakta. Aktif motorlar: %s", ", ".join(aktif) or "YOK")
     try:
         await bot.infinity_polling(timeout=30, request_timeout=60)
     finally:
